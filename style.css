@@ -1,0 +1,545 @@
+/* ═══════════════════════════════════════════════════════════
+   Lantaw-Dagat — shoreline monitoring station
+   Palette is lifted straight from the pumpboat icon drawn by
+   Function 1, so the map and the chrome around it speak the
+   same language: hull blue, bamboo katig gold, cyan wake.
+   ═══════════════════════════════════════════════════════════ */
+
+:root {
+    --abyss:      #061620;
+    --panel:      #0b2432;
+    --panel-2:    #0f2f41;
+    --hull:       #12435f;
+    --line:       #17415a;
+    --deck:       #dfeef4;
+    --muted:      #7ea6ba;
+    --katig:      #c9a227;
+    --katig-hi:   #e5bb33;
+    --wake:       #22d3ee;
+    --track:      #7dd3fc;
+    --distress:   #ef4444;
+    --distress-d: #7f1d1d;
+    --warn:       #fcd34d;
+    --warn-bg:    #2a2109;
+    --ok:         #34d399;
+
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Consolas, monospace;
+    --sans: system-ui, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+
+    --r-sm: 6px;
+    --r-md: 10px;
+    --r-lg: 14px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: var(--abyss);
+    color: var(--deck);
+    font-family: var(--sans);
+    overflow: hidden;
+}
+
+body {
+    display: grid;
+    grid-template-columns: 330px 1fr;
+    grid-template-rows: 58px 1fr 168px;
+    grid-template-areas:
+        "topbar  topbar"
+        "sidebar map"
+        "sidebar diagnostics";
+}
+
+/* ── Utility type ───────────────────────────────────────── */
+
+.metric-label,
+.panel-header,
+.counter,
+.sum-cell span,
+.metric-unit,
+.diag-sub,
+.link-pill,
+.clock,
+.advisory-level,
+.advisory-meta,
+.vessel-stat {
+    font-family: var(--mono);
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+}
+
+/* ── Top bar ────────────────────────────────────────────── */
+
+#topbar {
+    grid-area: topbar;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 0 18px;
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    border-bottom: 1px solid var(--line);
+}
+
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand-mark { width: 30px; height: 30px; flex: none; }
+.brand h1 {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 650;
+    letter-spacing: 0.02em;
+}
+.brand p {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--muted);
+}
+
+.topbar-right { display: flex; align-items: center; gap: 12px; }
+
+.clock { font-size: 0.8rem; color: var(--muted); }
+
+.link-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 5px 11px;
+    border-radius: 999px;
+    font-size: 0.62rem;
+    border: 1px solid transparent;
+}
+.link-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+}
+.link-up   { color: var(--ok);    background: rgba(52,211,153,.10); border-color: rgba(52,211,153,.35); }
+.link-down { color: var(--muted); background: rgba(126,166,186,.10); border-color: rgba(126,166,186,.3); }
+.link-demo { color: var(--katig-hi); background: rgba(229,187,51,.10); border-color: rgba(229,187,51,.4); }
+.link-up .link-dot { animation: breathe 2.4s ease-in-out infinite; }
+
+@keyframes breathe { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+
+/* ── Buttons ────────────────────────────────────────────── */
+
+.ghost-btn, .solid-btn {
+    font-family: var(--mono);
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    font-size: 0.66rem;
+    padding: 8px 13px;
+    border-radius: var(--r-sm);
+    cursor: pointer;
+    transition: background .15s, border-color .15s, color .15s;
+}
+.ghost-btn {
+    background: transparent;
+    color: var(--deck);
+    border: 1px solid var(--line);
+}
+.ghost-btn:hover { background: var(--panel-2); border-color: var(--wake); color: var(--wake); }
+.ghost-btn.wide { width: 100%; margin-top: 10px; }
+.ghost-btn.small { padding: 5px 9px; font-size: 0.6rem; }
+
+.solid-btn {
+    background: var(--katig);
+    color: #10222b;
+    border: 1px solid var(--katig);
+    font-weight: 700;
+}
+.solid-btn:hover { background: var(--katig-hi); }
+
+:focus-visible { outline: 2px solid var(--wake); outline-offset: 2px; }
+
+/* ── Sidebar ────────────────────────────────────────────── */
+
+#fleet-panel {
+    grid-area: sidebar;
+    background: var(--panel);
+    border-right: 1px solid var(--line);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+    overflow-y: auto;
+}
+
+.panel-block { display: flex; flex-direction: column; }
+
+.panel-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    font-size: 0.68rem;
+    color: var(--wake);
+    padding-bottom: 7px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--line);
+}
+.counter { font-size: 0.6rem; color: var(--muted); }
+.counter b { color: var(--deck); font-weight: 600; }
+
+.fleet-summary {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 7px;
+    margin-bottom: 12px;
+}
+.sum-cell {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    padding: 8px 4px;
+    text-align: center;
+}
+.sum-cell b {
+    display: block;
+    font-family: var(--mono);
+    font-size: 1.15rem;
+    line-height: 1.1;
+    color: var(--deck);
+}
+.sum-cell span { display: block; font-size: 0.52rem; color: var(--muted); margin-top: 3px; }
+.sum-sos b { color: var(--muted); }
+.sum-sos.live b { color: var(--distress); }
+
+.empty-state {
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: var(--muted);
+    margin: 4px 0 0;
+}
+
+#vessel-list { display: flex; flex-direction: column; gap: 7px; }
+
+/* Signature element: every fleet row carries the same bangka
+   that's on the map, rotated to that boat's live heading. */
+.vessel-item {
+    display: grid;
+    grid-template-columns: 34px 1fr auto;
+    gap: 10px;
+    align-items: center;
+    padding: 9px 10px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--hull);
+    border-radius: var(--r-sm);
+    cursor: pointer;
+    text-align: left;
+    width: 100%;
+    color: inherit;
+    font: inherit;
+    transition: border-color .15s, background .15s, transform .12s;
+}
+.vessel-item:hover { background: #143547; transform: translateX(2px); }
+.vessel-item.selected { border-color: var(--wake); border-left-color: var(--wake); }
+.vessel-item.sos { border-left-color: var(--distress); background: #2a1113; }
+.vessel-item.nofix { border-left-color: var(--warn); }
+.vessel-item.stale { opacity: .55; }
+
+.vessel-chip { width: 34px; height: 34px; }
+.vessel-chip svg { width: 100%; height: 100%; display: block; }
+
+.vessel-name {
+    display: block;
+    font-weight: 600;
+    font-size: 0.86rem;
+    letter-spacing: 0.01em;
+}
+.vessel-stat {
+    display: block;
+    font-size: 0.58rem;
+    color: var(--muted);
+    margin-top: 3px;
+}
+
+.status-tag {
+    font-family: var(--mono);
+    font-size: 0.56rem;
+    letter-spacing: 0.1em;
+    padding: 3px 7px;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+.status-normal { color: var(--ok); background: rgba(52,211,153,.12); }
+.status-nofix  { color: var(--warn); background: rgba(252,211,77,.12); }
+.status-sos    { color: #fff; background: var(--distress); animation: flashSOS 1s steps(1) infinite; }
+
+@keyframes flashSOS {
+    0%, 49%   { background: var(--distress); color: #fff; }
+    50%, 100% { background: var(--distress-d); color: #fecaca; }
+}
+
+/* ── Advisory ───────────────────────────────────────────── */
+
+.advisory {
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--muted);
+    border-radius: var(--r-sm);
+    background: var(--panel-2);
+    padding: 11px 12px;
+}
+.advisory-level { font-size: 0.6rem; color: var(--muted); }
+.advisory-text {
+    margin: 6px 0 0;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    color: var(--deck);
+}
+.advisory-meta { font-size: 0.55rem; color: var(--muted); margin-top: 8px; }
+.advisory-watch   { border-left-color: var(--wake); }
+.advisory-watch   .advisory-level { color: var(--wake); }
+.advisory-warning { border-left-color: var(--warn); background: var(--warn-bg); }
+.advisory-warning .advisory-level { color: var(--warn); }
+.advisory-danger  { border-left-color: var(--distress); background: #2a1113; }
+.advisory-danger  .advisory-level { color: var(--distress); }
+
+/* ── Return-to-port ─────────────────────────────────────── */
+
+.rtp-btn {
+    margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    align-items: center;
+    background: var(--katig);
+    color: #10222b;
+    border: none;
+    border-radius: var(--r-md);
+    padding: 13px;
+    cursor: pointer;
+    font-family: var(--mono);
+    text-transform: uppercase;
+    box-shadow: 0 0 0 0 rgba(201,162,39,.5);
+    transition: background .15s, box-shadow .2s;
+}
+.rtp-btn span { font-size: 0.78rem; font-weight: 700; letter-spacing: 0.06em; }
+.rtp-btn small { font-size: 0.55rem; letter-spacing: 0.1em; opacity: .72; }
+.rtp-btn:hover { background: var(--katig-hi); box-shadow: 0 0 0 4px rgba(201,162,39,.16); }
+.rtp-btn:disabled { background: #3d4148; color: #8b929a; cursor: not-allowed; box-shadow: none; }
+
+/* ── Map ────────────────────────────────────────────────── */
+
+#map-shell { grid-area: map; position: relative; }
+#map-container { position: absolute; inset: 0; background: #04101a; }
+.leaflet-container { background: #04101a; font-family: var(--sans); }
+
+/* Dark chrome for Leaflet's own controls */
+.leaflet-bar a, .leaflet-control-layers-expanded {
+    background: var(--panel-2);
+    color: var(--deck);
+    border-bottom-color: var(--line);
+}
+.leaflet-bar a:hover { background: var(--hull); color: #fff; }
+.leaflet-control-layers-toggle { background-color: var(--panel-2); }
+.leaflet-container .leaflet-control-attribution {
+    background: rgba(6,22,32,.78);
+    color: var(--muted);
+    font-size: 10px;
+}
+.leaflet-container .leaflet-control-attribution a { color: var(--track); }
+.leaflet-touch .leaflet-bar, .leaflet-touch .leaflet-control-layers { border-color: var(--line); }
+
+.bangka-icon { background: none; border: none; }
+
+/* Popup card from Function 1 is a light card on purpose — it stays
+   legible in daylight on a phone at the pier. Just soften the frame. */
+.vesselPopup .leaflet-popup-content-wrapper {
+    border-radius: 10px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.55);
+}
+.vesselPopup .leaflet-popup-content { margin: 12px 16px; }
+
+.sos-banner {
+    position: absolute;
+    top: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 900;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 13px;
+    border-radius: var(--r-md);
+    background: rgba(127,29,29,.94);
+    border: 1px solid var(--distress);
+    box-shadow: 0 8px 26px rgba(0,0,0,.5);
+}
+
+.sos-banner[hidden] { display: none; }
+
+.sos-banner-mark {
+    font-family: var(--mono);
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    font-size: 0.7rem;
+    color: #fff;
+    animation: flashSOS 1s steps(1) infinite;
+    padding: 3px 7px;
+    border-radius: 4px;
+}
+#sos-banner-text { font-size: 0.85rem; color: #fee2e2; }
+.sos-banner .ghost-btn { border-color: rgba(255,255,255,.4); color: #fff; }
+.sos-banner .ghost-btn:hover { background: rgba(255,255,255,.12); color: #fff; border-color: #fff; }
+
+/* ── Diagnostics ────────────────────────────────────────── */
+
+#diagnostics-panel {
+    grid-area: diagnostics;
+    background: var(--panel);
+    border-top: 1px solid var(--line);
+    padding: 12px 16px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow: hidden;
+}
+
+.diag-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.diag-title { font-size: 0.95rem; font-weight: 650; }
+.diag-sub { font-size: 0.6rem; color: var(--muted); }
+.diag-sub.warn { color: var(--warn); }
+.diag-sub.sos { color: var(--distress); }
+
+.metric-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 10px;
+}
+.metric-box {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    padding: 10px 12px;
+}
+.metric-label { font-size: 0.55rem; color: var(--muted); }
+.metric-value {
+    font-family: var(--mono);
+    font-size: 1.6rem;
+    font-weight: 600;
+    color: var(--wake);
+    line-height: 1.15;
+    margin-top: 4px;
+    font-variant-numeric: tabular-nums;
+}
+.metric-value.small { font-size: 0.95rem; }
+.metric-unit { font-size: 0.52rem; color: var(--muted); margin-top: 3px; }
+.metric-box.alert { border-color: var(--distress); }
+.metric-box.alert .metric-value { color: var(--distress); }
+.metric-box.stale .metric-value { color: var(--warn); }
+
+/* ── Modal ──────────────────────────────────────────────── */
+
+.modal-root {
+    position: fixed;
+    inset: 0;
+    background: rgba(3,12,18,.72);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+    padding: 20px;
+}
+
+.modal-root[hidden] { display: none; }
+
+.modal {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--r-lg);
+    padding: 20px;
+    width: min(430px, 100%);
+    box-shadow: 0 24px 60px rgba(0,0,0,.6);
+}
+.modal h2 {
+    margin: 0 0 10px;
+    font-size: 1rem;
+    font-weight: 650;
+}
+.modal p { font-size: 0.85rem; line-height: 1.55; color: var(--deck); margin: 0 0 10px; }
+.modal label {
+    display: block;
+    font-family: var(--mono);
+    font-size: 0.55rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    margin: 10px 0 5px;
+}
+.modal select, .modal textarea {
+    width: 100%;
+    background: var(--abyss);
+    color: var(--deck);
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    padding: 8px 10px;
+    font-family: var(--sans);
+    font-size: 0.85rem;
+}
+.modal textarea { resize: vertical; min-height: 78px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+/* ── Toasts ─────────────────────────────────────────────── */
+
+.toast-stack {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    z-index: 2500;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    pointer-events: none;
+}
+.toast {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--wake);
+    border-radius: var(--r-sm);
+    padding: 10px 14px;
+    font-size: 0.82rem;
+    max-width: 330px;
+    box-shadow: 0 10px 26px rgba(0,0,0,.5);
+    animation: toastIn .22s ease-out;
+}
+.toast.warn { border-left-color: var(--warn); }
+.toast.bad  { border-left-color: var(--distress); }
+.toast.good { border-left-color: var(--ok); }
+
+@keyframes toastIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+/* ── Small screens ──────────────────────────────────────── */
+
+@media (max-width: 900px) {
+    html, body { overflow: auto; }
+    body {
+        grid-template-columns: 1fr;
+        grid-template-rows: 58px 46vh auto auto;
+        grid-template-areas:
+            "topbar"
+            "map"
+            "diagnostics"
+            "sidebar";
+        height: auto;
+        min-height: 100%;
+    }
+    #fleet-panel { border-right: none; border-top: 1px solid var(--line); }
+    .metric-grid { grid-template-columns: repeat(2, 1fr); }
+    #diagnostics-panel { overflow: visible; }
+    .brand p { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: .001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .001ms !important;
+    }
+    .status-sos { background: var(--distress); color: #fff; }
+}

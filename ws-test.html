@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Telemetry socket test</title>
+<style>
+    body { font: 15px/1.5 system-ui, sans-serif; background:#0b2432; color:#dfeef4;
+           margin:0; padding:24px; }
+    h1 { font-size:1.1rem; margin:0 0 4px; }
+    p.sub { color:#7ea6ba; margin:0 0 18px; font-size:.85rem; }
+    #state { font-family:ui-monospace,Consolas,monospace; font-size:1.2rem;
+             padding:12px 16px; border-radius:8px; margin-bottom:14px; }
+    .wait { background:#1f2a17; color:#fcd34d; }
+    .ok   { background:#0f2f41; color:#34d399; }
+    .bad  { background:#2a1113; color:#ef4444; }
+    #verdict { background:#0f2f41; border-left:3px solid #22d3ee; padding:12px 16px;
+               border-radius:6px; margin-bottom:14px; white-space:pre-wrap; }
+    #log { font-family:ui-monospace,Consolas,monospace; font-size:12px;
+           background:#061620; border:1px solid #17415a; border-radius:6px;
+           padding:12px; height:320px; overflow:auto; white-space:pre-wrap;
+           word-break:break-all; }
+    input { font-family:ui-monospace,Consolas,monospace; background:#061620;
+            color:#dfeef4; border:1px solid #17415a; border-radius:6px;
+            padding:8px 10px; width:340px; }
+    button { background:#c9a227; color:#10222b; border:none; border-radius:6px;
+             padding:9px 14px; font-weight:700; cursor:pointer; }
+</style>
+</head>
+<body>
+
+<h1>Telemetry socket test</h1>
+<p class="sub">Open this next to index.html with Live Server. It only listens — it sends nothing to the fleet.</p>
+
+<div>
+    <input id="url" value="ws://localhost:1880/ws/telemetry">
+    <button id="go" type="button">Reconnect</button>
+</div>
+
+<div id="state" class="wait">CONNECTING…</div>
+<div id="verdict">Waiting for the first packet. Make sure a boat is reporting, or press Inject on your Node-RED test node.</div>
+<div id="log"></div>
+
+<script>
+var sock = null, seen = 0;
+var $ = function (id) { return document.getElementById(id); };
+
+function log(line) {
+    $("log").textContent += line + "\n";
+    $("log").scrollTop = $("log").scrollHeight;
+}
+function state(text, cls) { $("state").textContent = text; $("state").className = cls; }
+function verdict(text) { $("verdict").textContent = text; }
+
+function judge(raw) {
+    var data;
+    try { data = JSON.parse(raw); }
+    catch (e) {
+        verdict("NOT JSON.\nGot a plain string. If it looks like  P,ID,...,lat,lon,sos\n"
+              + "then output 2 is passing the raw packet through instead of the object —\n"
+              + "check that you pasted the v3 function and that it is on the LOWER port.");
+        return;
+    }
+    if (data._msgid || (data.payload && data.payload.payload)) {
+        verdict("WRAPPED MESSAGE.\nThe websocket out node has 'Send/Receive: entire message' CHECKED.\n"
+              + "Uncheck it, deploy, reload. The dashboard wants payload only.");
+        return;
+    }
+    var p = data.payload || data;
+    if (!p.id) {
+        verdict("NO id FIELD.\nThis isn't the dashboard payload. Output 2 is probably wired\n"
+              + "to the worldmap branch, or the Outputs field is still 1.");
+        return;
+    }
+    verdict("LOOKS CORRECT.\nvessel: " + p.id
+          + "\nlat/lon: " + p.lat + ", " + p.lon
+          + "\nstatus: " + p.status + "   fix: " + p.fix
+          + "\nIf the dashboard still shows nothing, the problem is in the page, not the feed.");
+}
+
+function connect() {
+    if (sock) { try { sock.close(); } catch (e) {} }
+    seen = 0;
+    state("CONNECTING…", "wait");
+    log("--- connecting to " + $("url").value + " ---");
+    try { sock = new WebSocket($("url").value); }
+    catch (e) { state("BAD URL", "bad"); log("ERROR " + e.message); return; }
+
+    sock.onopen = function () {
+        state("OPEN — socket connected", "ok");
+        log("OPEN. Now waiting for packets.");
+        verdict("Socket is connected. If nothing arrives below within a minute,\n"
+              + "output 2 is not emitting: check Function 1 has Outputs = 2 and the\n"
+              + "lower port is wired to the websocket out node.");
+    };
+    sock.onmessage = function (e) {
+        seen++;
+        log("RX #" + seen + "  " + e.data);
+        if (seen === 1) { judge(e.data); }
+    };
+    sock.onerror = function () { log("ERROR event"); };
+    sock.onclose = function (e) {
+        state("CLOSED (code " + e.code + ")", "bad");
+        log("CLOSED code=" + e.code);
+        if (!seen) {
+            verdict("NOTHING IS LISTENING on that path.\n"
+                  + "In Node-RED open the websocket out node:\n"
+                  + "  • Type must be 'Listen on', not 'Connect to'\n"
+                  + "  • Path must be exactly  /ws/telemetry\n"
+                  + "Then Deploy and press Reconnect here.");
+        }
+    };
+}
+
+$("go").addEventListener("click", connect);
+connect();
+</script>
+</body>
+</html>
