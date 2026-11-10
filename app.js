@@ -1,16 +1,6 @@
 /* ═══════════════════════════════════════════════════════════
    Lantaw-Dagat — shoreline monitoring station (browser side)
-
-   This file is a direct port of the Node-RED node "Function 1
-   (vessel tracker)". Same tuning constants, same geo helpers,
-   same no-fix rules, same pumpboat SVG, same popup card — so a
-   boat looks and behaves identically on node-red-worldmap and
-   on this dashboard.
-
-   It accepts either shape on the socket:
-     1. the object Function 1 emits on output 2, or
-     2. a raw "P,ID,...,lat,lon,sos" packet straight off the
-        gateway (parsed here with Function 1's own rules).
+   Upgraded with Live PDR, RF Signal (RSSI/SNR), and Mesh Hop Metrics
    ═══════════════════════════════════════════════════════════ */
 
 (function () {
@@ -32,12 +22,7 @@ const MAP_NOFIX_NORMAL = false;            // map no-fix packets that aren't SOS
 
 const WS_URL       = "ws://localhost:1880/ws/telemetry";
 const WS_RETRY_MS  = 4000;
-const START_VIEW   = [11.2, 123.7];
-const START_ZOOM   = 11;
 
-// Return-to-port. The gateway compares the trimmed serial line against this
-// exact string, so don't dress it up as JSON. Repeats are cheap insurance:
-// the gateway bumps rtpSeq each time, so vessels relay every one of them.
 const RTP_COMMAND = "RTP";
 const RTP_REPEATS = 3;
 const RTP_GAP_MS  = 1200;
@@ -47,24 +32,22 @@ const map = L.map('map-container').setView([10.34, 123.92], 12);
 
 L.tileLayer('./tiles-wiki/{z}/{x}/{y}.png', {
     minZoom: 11,
-    maxZoom: 17, // Match the max zoom here
+    maxZoom: 17,
     attribution: 'Offline Map &copy; Wikimedia & OpenStreetMap contributors'
 }).addTo(map);
 
-// Same three layers Function 1 writes to on worldmap.
 const layers = {
     Vessels:  L.layerGroup().addTo(map),
     Distress: L.layerGroup().addTo(map),
     Tracks:   L.layerGroup().addTo(map)
 };
 L.control.layers(null, layers, { collapsed: true, position: "topright" }).addTo(map);
-
 L.control.scale({ imperial: false, position: "bottomleft" }).addTo(map);
 
 setTimeout(() => map.invalidateSize(), 200);
 window.addEventListener("resize", () => map.invalidateSize());
 
-// ── Geo helpers (identical to Function 1) ───────────────────
+// ── Geo helpers ─────────────────────────────────────────────
 const rad = (d) => d * Math.PI / 180;
 
 function metresBetween(la1, lo1, la2, lo2) {
@@ -86,30 +69,35 @@ function bearingBetween(la1, lo1, la2, lo2) {
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g,
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-// ── Fleet state (the browser's version of flow context) ─────
-// fleet[id] = { pts, t, brg, kts, sos, noFix, battery, posSource,
-//               fixAgeMin, source, lastSeen, marker, track, wake }
+// ── Fleet state ─────────────────────────────────────────────
 const fleet = Object.create(null);
 let selectedId = null;
 
 // ── Ingest ──────────────────────────────────────────────────
-// Raw packet parser — the same guard rails as Function 1.
 function parseRawPacket(text) {
-    const parts = String(text).trim().split(",");
+    let clean = String(text).trim();
+    const match = clean.match(/([PB]),.*/);
+    if (match) { clean = match[0]; }
+
+    const parts = clean.split(",");
     if (parts.length < 7) { return null; }
     if (parts[0] !== "P" && parts[0] !== "B") { return null; }
 
-    const latRaw = parseFloat(parts[4]);
-    const lonRaw = parseFloat(parts[5]);
+    const seqRaw  = parseInt(parts[2], 10);
+    const hopsRaw = parseInt(parts[3], 10);
+    const latRaw  = parseFloat(parts[4]);
+    const lonRaw  = parseFloat(parts[5]);
     if (!isFinite(latRaw) || !isFinite(lonRaw)) { return null; }
     if (Math.abs(latRaw) > 90 || Math.abs(lonRaw) > 180) { return null; }
 
     return {
         id: parts[1],
+        seq: isFinite(seqRaw) ? seqRaw : null,
+        hops: isFinite(hopsRaw) ? hopsRaw : 0,
         lat: latRaw,
         lon: lonRaw,
-        status: parts[6] === "1" ? "SOS" : "Normal",
-        battery: parts[3] !== undefined ? parts[3] : "--",
+        status: parts[6].trim() === "1" ? "SOS" : "Normal",
+        packetType: parts[0] === "B" ? "BACKLOG" : "LIVE",
         source: parts[0] === "B" ? "Backlog" : "Live"
     };
 }
@@ -119,22 +107,19 @@ function handleMessage(raw) {
     try {
         data = typeof raw === "string" ? JSON.parse(raw) : raw;
     } catch (err) {
-        data = parseRawPacket(raw);        // not JSON — try the CSV form
+        data = parseRawPacket(raw);
         if (!data) { return; }
     }
-    if (data && data.payload) { data = data.payload; }   // Node-RED msg wrapper
+    if (data && data.payload) { data = data.payload; }
     if (!data) { return; }
     const shaped = data.id ? data : adaptWorldmap(data);
     if (!shaped) { return; }
     ingest(shaped);
 }
 
-// Fallback for a websocket wired to output 1: worldmap marker messages carry
-// name / lat / lon / layer, which is enough. Speed and heading aren't in that
-// payload, but we recompute both from the trail anyway.
 function adaptWorldmap(d) {
     if (typeof d.name !== "string") { return null; }
-    if (d.line || d.layer === "Tracks") { return null; }   // track polylines
+    if (d.line || d.layer === "Tracks") { return null; }
     if (!isFinite(Number(d.lat)) || !isFinite(Number(d.lon))) { return null; }
 
     const label = String(d.tooltip || d.label || "");
@@ -144,7 +129,6 @@ function adaptWorldmap(d) {
         lon: d.lon,
         status: d.layer === "Distress" ? "SOS" : "Normal",
         fix: !/no fix/i.test(label),
-        battery: "--",
         timestamp: nowStamp(),
         source: "Live"
     };
@@ -158,19 +142,64 @@ function ingest(data) {
     if (Math.abs(latRaw) > 90 || Math.abs(lonRaw) > 180) { return; }
 
     const sos = String(data.status).toUpperCase() === "SOS" || data.sos === true;
-
-    // Either coordinate exactly zero means the module hasn't locked yet.
-    // Function 1 may already have told us; fall back to the same test.
     const noFix = (data.fix === false) || (data.noFix === true) ||
                   (latRaw === 0 || lonRaw === 0);
 
-    // A no-fix ping is only interesting if it's a distress call.
     if (noFix && !sos && !MAP_NOFIX_NORMAL) { return; }
 
     const now = Date.now();
-    const state = fleet[id] || (fleet[id] = { pts: [], t: 0, brg: 0, kts: 0 });
+    const state = fleet[id] || (fleet[id] = {
+        pts: [], t: 0, brg: 0, kts: 0,
+        heard: 0, missed: 0, lastSeq: null, backlogCount: 0
+    });
 
-    // Only real fixes are allowed to touch trail, bearing and speed.
+    // ── PDR & Sequence Gap Tracking (Browser Fallback + Node-RED Sync) ──
+    const pktType = data.packetType || (data.source === "Backlog" ? "BACKLOG" : "LIVE");
+    const seqNum = (data.seq !== undefined && data.seq !== null && isFinite(Number(data.seq)))
+                   ? Number(data.seq) : null;
+
+    if (data.pdr !== undefined && isFinite(Number(data.pdr))) {
+        // Use exact numbers from Node-RED parser if available
+        state.pdr          = Number(data.pdr);
+        state.packetLoss   = Number(data.packetLoss ?? (100 - state.pdr));
+        state.heard        = Number(data.packetsHeard ?? state.heard + 1);
+        state.missed       = Number(data.packetsMissed ?? state.missed);
+        state.backlogCount = Number(data.backlogReplayed ?? state.backlogCount);
+        if (seqNum !== null) { state.lastSeq = seqNum; }
+    } else if (seqNum !== null) {
+        // Compute PDR directly in browser if raw CSV or demo is used
+        if (pktType === "LIVE") {
+            if (state.lastSeq !== null) {
+                if (seqNum > state.lastSeq) {
+                    const gap = seqNum - state.lastSeq - 1;
+                    if (gap > 0 && gap < 200) { state.missed += gap; }
+                } else if (seqNum < state.lastSeq) {
+                    state.heard = 0; state.missed = 0;
+                }
+            }
+            state.lastSeq = seqNum;
+            state.heard++;
+        } else {
+            state.backlogCount++;
+        }
+        const expected = state.heard + state.missed;
+        state.pdr = expected > 0 ? Number(((state.heard / expected) * 100).toFixed(1)) : 100.0;
+        state.packetLoss = expected > 0 ? Number(((state.missed / expected) * 100).toFixed(1)) : 0.0;
+    } else {
+        state.heard++;
+        const expected = state.heard + state.missed;
+        state.pdr = expected > 0 ? Number(((state.heard / expected) * 100).toFixed(1)) : 100.0;
+        state.packetLoss = 0.0;
+    }
+
+    state.seq        = seqNum !== null ? seqNum : state.lastSeq;
+    state.packetType = pktType;
+    state.hops       = (data.hops !== undefined && isFinite(Number(data.hops))) ? Number(data.hops) : (state.hops ?? 0);
+    state.route      = data.route || (state.hops === 0 ? "Direct (0 Hops)" : `Mesh Relay (${state.hops} ${state.hops === 1 ? "Hop" : "Hops"})`);
+    state.rssi       = (data.rssi !== undefined && data.rssi !== "N/A") ? data.rssi : (state.rssi ?? "--");
+    state.snr        = (data.snr  !== undefined && data.snr  !== "N/A") ? data.snr  : (state.snr  ?? "--");
+
+    // ── Speed & Bearing from GPS Trail ──────────────────────
     if (!noFix) {
         let movedM = null;
         if (state.pts.length) {
@@ -207,7 +236,6 @@ function ingest(data) {
         lat = 0; lon = 0;
         posSource = "No fix - 0,0";
     } else {
-        // "drop": raise the alert, put nothing on the map.
         state.sos = sos; state.noFix = true; state.mapped = false;
         state.lastSeen = now;
         toast("SOS from " + escapeHtml(id) + " — no fix, nothing to plot", "bad");
@@ -215,7 +243,6 @@ function ingest(data) {
         return;
     }
 
-    // Trust Function 1's own numbers when it sends them.
     state.lat        = lat;
     state.lon        = lon;
     state.sos        = sos;
@@ -224,15 +251,19 @@ function ingest(data) {
     state.posSource  = data.positionSource || posSource;
     state.fixAgeMin  = (data.fixAgeMin !== undefined && data.fixAgeMin !== null)
                        ? data.fixAgeMin : fixAgeMin;
-    state.battery    = (data.battery === undefined || data.battery === "") ? "--" : data.battery;
-    state.source     = data.source || "Live";
+    state.source     = pktType === "BACKLOG" ? "Backlog" : (data.source || "Live");
     state.stamp      = data.timestamp || nowStamp();
     state.lastSeen   = now;
-    if (!noFix && data.heading !== undefined && isFinite(Number(data.heading))) {
+    if (!noFix && data.heading !== undefined && isFinite(Number(data.heading)) && Number(data.heading) !== 0) {
         state.brg = Number(data.heading);
     }
-    if (!noFix && data.speed !== undefined && isFinite(Number(data.speed))) {
+    if (!noFix && data.speed !== undefined && isFinite(Number(data.speed)) && Number(data.speed) !== 0) {
         state.kts = Number(data.speed);
+    }
+
+    // Auto-select the first vessel that appears so the bottom diagnostics panel is immediately live
+    if (!selectedId) {
+        selectedId = id;
     }
 
     draw(id, state);
@@ -241,7 +272,7 @@ function ingest(data) {
     if (sos) { raiseSos(id); }
 }
 
-// ── The boat (verbatim from Function 1) ─────────────────────
+// ── The boat SVG ────────────────────────────────────────────
 function pumpboatIcon(deg, distress, moving, nofix) {
     const hull    = distress ? "#7f1d1d" : "#12435f";
     const deck    = distress ? "#fde7e7" : "#e6f4f7";
@@ -297,7 +328,7 @@ function pumpboatIcon(deg, distress, moving, nofix) {
 </svg>`;
 }
 
-// ── Popup card (verbatim from Function 1) ───────────────────
+// ── Popup card ──────────────────────────────────────────────
 function nowStamp() {
     return new Date().toLocaleTimeString("en-PH", {
         hour: "2-digit", minute: "2-digit", second: "2-digit",
@@ -314,7 +345,7 @@ function buildPopup(id, st) {
     const chipFg = sos ? "#991b1b" : "#166534";
     const row = (k, v) =>
         `<tr><td style="color:#64748b;padding:2px 12px 2px 0;white-space:nowrap">${k}</td>` +
-        `<td style="color:#0f172a;font-variant-numeric:tabular-nums">${v}</td></tr>`;
+        `<td style="color:#0f172a;font-variant-numeric:tabular-nums"><b>${v}</b></td></tr>`;
 
     const fixBanner = noFix ? `
   <div style="margin:8px 0 2px;padding:6px 9px;border-radius:6px;background:#fef3c7;
@@ -322,9 +353,8 @@ function buildPopup(id, st) {
     <b>NO GPS FIX</b><br>
     ${st.pts.length
         ? "Pin shows the last confirmed position" +
-          (st.fixAgeMin !== null && st.fixAgeMin !== undefined ? ` (${st.fixAgeMin} min ago).` : ".") +
-          " The vessel may have moved since."
-        : "No position ever received from this unit. Pin is a placeholder, not a location."}
+          (st.fixAgeMin !== null && st.fixAgeMin !== undefined ? ` (${st.fixAgeMin} min ago).` : ".")
+        : "No position ever received from this unit."}
   </div>` : "";
 
     const posText = noFix
@@ -333,7 +363,10 @@ function buildPopup(id, st) {
             : `<span style="color:#b45309">unknown</span>`)
         : `${st.lat.toFixed(5)}, ${st.lon.toFixed(5)}`;
 
-    return `<div style="font:13px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;min-width:200px">
+    const pdrText = st.pdr !== undefined ? `${st.pdr.toFixed(1)}% (${st.heard} ok / ${st.missed} lost)` : "--";
+    const rfText  = st.rssi !== "--" ? `${st.rssi} dBm / ${st.snr} dB` : "--";
+
+    return `<div style="font:13px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;min-width:210px">
   <div style="display:flex;align-items:center;gap:8px;padding-bottom:7px;border-bottom:1px solid #e2e8f0">
     <span style="font-size:17px">${sos ? "🆘" : "⛵"}</span>
     <b style="font-size:14px;letter-spacing:.4px;color:#0f172a">${escapeHtml(id)}</b>
@@ -344,11 +377,12 @@ function buildPopup(id, st) {
   </div>
   ${fixBanner}
   <table style="border-collapse:collapse;font-size:12px;margin-top:6px">
+    ${row("PDR", pdrText)}
+    ${row("Signal", rfText)}
+    ${row("Route", st.route || `${st.hops ?? 0} hops`)}
+    ${row("Seq #", st.seq !== null && st.seq !== undefined ? `#${st.seq} (${st.source})` : st.source)}
     ${row("Position", posText)}
-    ${row("Fix", st.posSource)}
-    ${row("Heading", noFix ? "&mdash;" : `${heading}&deg;`)}
-    ${row("Speed", noFix ? "&mdash;" : `${knots.toFixed(1)} kn`)}
-    ${row("Source", st.source)}
+    ${row("Heading / Spd", noFix ? "&mdash;" : `${heading}&deg; &middot; ${knots.toFixed(1)} kn`)}
     ${row("Updated", st.stamp)}
   </table>
 </div>`;
@@ -370,14 +404,14 @@ function draw(id, st) {
 
     if (!st.marker) {
         st.marker = L.marker([st.lat, st.lon], { icon, riseOnHover: true })
-            .bindPopup("", { className: "vesselPopup", maxWidth: 300 })
+            .bindPopup("", { className: "vesselPopup", maxWidth: 320 })
             .on("click", () => select(id));
         targetGrp.addLayer(st.marker);
         st.group = targetGrp;
     } else {
         st.marker.setLatLng([st.lat, st.lon]);
         st.marker.setIcon(icon);
-        if (st.group !== targetGrp) {          // promoted to / cleared from Distress
+        if (st.group !== targetGrp) {
             st.group.removeLayer(st.marker);
             targetGrp.addLayer(st.marker);
             st.group = targetGrp;
@@ -396,7 +430,6 @@ function draw(id, st) {
         st.marker.setTooltipContent(labelText);
     }
 
-    // History: thin, dashed, faded.
     if (st.pts.length > 1) {
         const trackStyle = { color: st.sos ? "#fca5a5" : "#7dd3fc", weight: 2, opacity: 0.45,
                              dashArray: "1 7", interactive: false };
@@ -407,7 +440,6 @@ function draw(id, st) {
             st.track.setLatLngs(st.pts).setStyle(trackStyle);
         }
 
-        // Recent leg: brighter and thicker, so it reads as a comet tail.
         const wakeStyle = { color: st.sos ? "#ef4444" : "#22d3ee", weight: 4, opacity: 0.95,
                             interactive: false };
         const recent = st.pts.slice(-COMET_POINTS);
@@ -430,7 +462,6 @@ function removeVessel(id) {
     if (selectedId === id) { selectedId = null; clearDiagnostics(); }
 }
 
-// TTL sweep — the browser's version of the worldmap ttl field.
 setInterval(() => {
     const now = Date.now();
     let changed = false;
@@ -450,7 +481,7 @@ const $ = (id) => document.getElementById(id);
 function renderFleet() {
     const ids = Object.keys(fleet).sort((a, b) => {
         const A = fleet[a], B = fleet[b];
-        if (A.sos !== B.sos) { return A.sos ? -1 : 1; }          // distress on top
+        if (A.sos !== B.sos) { return A.sos ? -1 : 1; }
         if (A.noFix !== B.noFix) { return A.noFix ? -1 : 1; }
         return a.localeCompare(b);
     });
@@ -481,9 +512,11 @@ function renderFleet() {
                       : st.noFix ? '<span class="status-tag status-nofix">No fix</span>'
                       : '<span class="status-tag status-normal">Normal</span>';
 
+            const pdrBadge = st.pdr !== undefined ? `PDR ${st.pdr.toFixed(0)}%` : "";
+            const hopBadge = `${st.hops ?? 0}H`;
             const stat = st.noFix
                 ? (st.posSource || "position unknown")
-                : `${st.kts.toFixed(1)} kn &middot; ${Math.round(st.brg)}&deg;`;
+                : `${pdrBadge} &middot; ${hopBadge} &middot; ${st.kts.toFixed(1)} kn`;
 
             return `<button type="button" class="${cls.join(" ")}" data-id="${escapeHtml(id)}">
                 <span class="vessel-chip">${pumpboatIcon(Math.round(st.brg), st.sos, moving, st.noFix)}</span>
@@ -524,8 +557,12 @@ function clearDiagnostics() {
     $("diag-vessel").textContent = "No vessel selected";
     $("diag-fix").textContent = "Pick a boat from the fleet list or tap a marker";
     $("diag-fix").className = "diag-sub";
-    ["diag-speed", "diag-heading", "diag-battery", "diag-pos", "diag-time"]
-        .forEach((k) => { $(k).textContent = "--"; });
+    ["diag-pdr", "diag-rssi", "diag-hops", "diag-seq", "diag-speed", "diag-heading", "diag-pos", "diag-time"]
+        .forEach((k) => { if ($(k)) $(k).textContent = "--"; });
+    if ($("diag-pkt-counts")) $("diag-pkt-counts").textContent = "0 heard \u00B7 0 missed";
+    if ($("diag-snr"))        $("diag-snr").textContent = "SNR: -- dB";
+    if ($("diag-route"))      $("diag-route").textContent = "hop count";
+    if ($("diag-pkt-type"))   $("diag-pkt-type").textContent = "packet stream";
     $("diag-source").textContent = "no data";
     $("diag-age").textContent = "--";
     document.querySelectorAll(".metric-box").forEach((b) => b.classList.remove("alert", "stale"));
@@ -547,13 +584,46 @@ function renderDiagnostics(id) {
         sub.textContent = "No GPS fix — showing " + (st.posSource || "fallback position").toLowerCase();
         sub.className = "diag-sub warn";
     } else {
-        sub.textContent = st.source === "Backlog" ? "Backlog packet replayed" : "Live telemetry";
+        sub.textContent = st.source === "Backlog" ? "Store-and-forward backlog replayed" : "Live LoRa telemetry";
         sub.className = "diag-sub";
     }
 
+    // 1. PDR & Packet Counts
+    if ($("diag-pdr")) {
+        $("diag-pdr").textContent = st.pdr !== undefined ? `${st.pdr.toFixed(1)}%` : "100.0%";
+    }
+    if ($("diag-pkt-counts")) {
+        const blTxt = st.backlogCount > 0 ? ` \u00B7 ${st.backlogCount} BL` : "";
+        $("diag-pkt-counts").textContent = `${st.heard ?? 1} ok \u00B7 ${st.missed ?? 0} lost${blTxt}`;
+    }
+
+    // 2. RF Signal (RSSI & SNR)
+    if ($("diag-rssi")) {
+        $("diag-rssi").textContent = st.rssi !== undefined && st.rssi !== "--" ? `${st.rssi} dBm` : "--";
+    }
+    if ($("diag-snr")) {
+        $("diag-snr").textContent = st.snr !== undefined && st.snr !== "--" ? `SNR: ${st.snr} dB` : "SNR: -- dB";
+    }
+
+    // 3. Mesh Hops & Route
+    if ($("diag-hops")) {
+        $("diag-hops").textContent = st.hops !== undefined ? `${st.hops}` : "0";
+    }
+    if ($("diag-route")) {
+        $("diag-route").textContent = st.hops === 0 ? "Direct to Gateway" : `Relayed (${st.hops} ${st.hops === 1 ? "hop" : "hops"})`;
+    }
+
+    // 4. Sequence Number & Packet Type
+    if ($("diag-seq")) {
+        $("diag-seq").textContent = st.seq !== null && st.seq !== undefined ? `#${st.seq}` : "--";
+    }
+    if ($("diag-pkt-type")) {
+        $("diag-pkt-type").textContent = st.packetType === "BACKLOG" ? "Backlog ('B' pkt)" : "Live ('P' pkt)";
+    }
+
+    // 5. Speed, Heading, Position, Time
     $("diag-speed").textContent   = st.noFix ? "--" : st.kts.toFixed(1);
     $("diag-heading").textContent = st.noFix ? "--" : Math.round(st.brg) + "\u00B0";
-    $("diag-battery").textContent = st.battery;
     $("diag-pos").textContent     = (st.noFix && !st.pts.length)
         ? "unknown"
         : st.lat.toFixed(5) + ", " + st.lon.toFixed(5);
@@ -650,8 +720,6 @@ function sendRtp() {
         return;
     }
 
-    // The gateway's loop() does:  if (cmd == "RTP") broadcastRTP();
-    // so the payload has to be that exact token, nothing else.
     const btn = $("rtp-btn");
     const label = btn.querySelector("span");
     let sent = 0;
@@ -774,37 +842,42 @@ function toast(text, kind) {
 setInterval(() => { $("station-clock").textContent = nowStamp(); }, 1000);
 $("station-clock").textContent = nowStamp();
 
-// ── Demo feed (so the station is presentable with no gateway) ─
+// ── Demo feed (simulates realistic Seq, Hops, RSSI & SNR) ───
 let demoTimer = null;
 let demoTick = 0;
 
 const demoBoats = [
-    { id: "BANGKA-01", lat: 11.26, lon: 123.62, brg:  75, kts: 5.2, batt: "12.4" },
-    { id: "BANGKA-02", lat: 11.14, lon: 123.78, brg: 200, kts: 3.8, batt: "11.9" },
-    { id: "BANGKA-03", lat: 11.31, lon: 123.81, brg: 310, kts: 6.4, batt: "12.7" },
-    { id: "BANGKA-04", lat: 11.09, lon: 123.58, brg:  20, kts: 4.1, batt: "11.2" }
+    { id: "VESSEL1", lat: 10.345, lon: 123.925, brg:  75, kts: 5.2, seq: 100, hops: 0, rssi: -68, snr:  9.5 },
+    { id: "VESSEL2", lat: 10.332, lon: 123.940, brg: 200, kts: 3.8, seq: 200, hops: 1, rssi: -89, snr:  4.2 },
+    { id: "VESSEL3", lat: 10.355, lon: 123.955, brg: 310, kts: 6.4, seq: 300, hops: 2, rssi: -104, snr: -2.5 }
 ];
 
 function stepDemo() {
     demoTick++;
     demoBoats.forEach((b, i) => {
         b.brg = (b.brg + (Math.random() * 8 - 4) + 360) % 360;
-        const dM = b.kts * 0.5144 * 2.2 * 12;                 // ~12x real time
+        const dM = b.kts * 0.5144 * 2.2 * 5;
         b.lat += (dM * Math.cos(rad(b.brg))) / 111320;
         b.lon += (dM * Math.sin(rad(b.brg))) / (111320 * Math.cos(rad(b.lat)));
 
-        // BANGKA-02 loses its fix, then calls for help without one.
+        // Simulate occasional packet loss on VESSEL3 (2 hops out) so PDR updates realistically
+        const dropped = (i === 2 && demoTick % 5 === 0);
+        b.seq += dropped ? 2 : 1;
+
         const lostFix = (i === 1 && demoTick > 18);
         const sos     = (i === 2 && demoTick > 10) || (i === 1 && demoTick > 22);
 
         ingest({
             id: b.id,
+            seq: b.seq,
+            hops: b.hops,
+            rssi: b.rssi + Math.floor(Math.random() * 5 - 2),
+            snr: Number((b.snr + (Math.random() * 1.2 - 0.6)).toFixed(1)),
             lat: lostFix ? 0 : b.lat,
             lon: lostFix ? 0 : b.lon,
             status: sos ? "SOS" : "Normal",
             speed: b.kts.toFixed(1),
             heading: Math.round(b.brg),
-            battery: b.batt,
             timestamp: nowStamp(),
             source: "Live"
         });
@@ -819,7 +892,7 @@ function startDemo() {
     $("demo-toggle").textContent = "Stop demo feed";
     $("rtp-btn").disabled = false;
     setLink("demo", "Demo data");
-    toast("Demo feed running — this is not live telemetry", "warn");
+    toast("Demo feed running — simulating PDR, RSSI & mesh hops", "warn");
 }
 
 function stopDemo() {
