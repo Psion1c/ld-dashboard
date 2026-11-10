@@ -43,11 +43,12 @@ const RTP_REPEATS = 3;
 const RTP_GAP_MS  = 1200;
 
 // ── Map ─────────────────────────────────────────────────────
-const map = L.map("map-container", { zoomControl: true }).setView(START_VIEW, START_ZOOM);
+const map = L.map('map-container').setView([10.34, 123.92], 12); 
 
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    attribution: '&copy; <a href="https://www.openstreetmap.org/">OpenStreetMap</a> contributors'
+L.tileLayer('./tiles-wiki/{z}/{x}/{y}.png', {
+    minZoom: 11,
+    maxZoom: 17, // Match the max zoom here
+    attribution: 'Offline Map &copy; Wikimedia & OpenStreetMap contributors'
 }).addTo(map);
 
 // Same three layers Function 1 writes to on worldmap.
