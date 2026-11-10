@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lantaw-Dagat — Shoreline Monitoring Station</title>
+<link rel="stylesheet" href="lib/leaflet/leaflet.css" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<header id="topbar">
+    <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true">
+            <g stroke="#c9a227" stroke-width="3" stroke-linecap="round">
+                <line x1="12" y1="27" x2="52" y2="27"/>
+                <line x1="12" y1="43" x2="52" y2="43"/>
+            </g>
+            <path d="M32 5 C38 15 40 31 39 48 C39 53 36 56.5 32 57.5 C28 56.5 25 53 25 48 C24 31 26 15 32 5 Z"
+                  fill="#12435f" stroke="#08202c" stroke-width="1.4"/>
+            <rect x="27" y="29" width="10" height="15" rx="3.5" fill="#3f92c4"/>
+        </svg>
+        <div>
+            <h1>Lantaw-Dagat</h1>
+            <p>Shoreline monitoring station</p>
+        </div>
+    </div>
+
+    <div class="topbar-right">
+        <div id="link-state" class="link-pill link-down">
+            <span class="link-dot"></span><span id="link-text">Connecting</span>
+        </div>
+        <div class="clock" id="station-clock">--:--:--</div>
+        <button id="demo-toggle" class="ghost-btn" type="button">Start demo feed</button>
+    </div>
+</header>
+
+<aside id="fleet-panel">
+    <section class="panel-block">
+        <div class="panel-header">
+            <span>Fleet</span>
+            <span class="counter"><b id="count-total">0</b> tracked</span>
+        </div>
+        <div id="fleet-summary" class="fleet-summary">
+            <div class="sum-cell"><b id="count-underway">0</b><span>Underway</span></div>
+            <div class="sum-cell"><b id="count-nofix">0</b><span>No fix</span></div>
+            <div class="sum-cell sum-sos"><b id="count-sos">0</b><span>Distress</span></div>
+        </div>
+        <div id="vessel-list">
+            <p class="empty-state">No telemetry yet. Connect the shoreline gateway, or start the demo feed to see how the station behaves.</p>
+        </div>
+    </section>
+
+    <section class="panel-block">
+        <div class="panel-header"><span>PAGASA advisory</span></div>
+        <div id="advisory-card" class="advisory advisory-none">
+            <div class="advisory-level" id="advisory-level">No advisory posted</div>
+            <p class="advisory-text" id="advisory-text">Radio watch only. Post the latest bulletin here so the whole watch team sees the same information.</p>
+            <div class="advisory-meta" id="advisory-meta"></div>
+        </div>
+        <button id="advisory-edit" class="ghost-btn wide" type="button">Post advisory</button>
+    </section>
+
+    <button class="rtp-btn" id="rtp-btn" type="button">
+        <span>Broadcast return-to-port</span>
+        <small>Fleet-wide, 1-byte command</small>
+    </button>
+</aside>
+
+<main id="map-shell">
+    <div id="map-container"></div>
+    <div id="sos-banner" class="sos-banner" hidden>
+        <span class="sos-banner-mark">SOS</span>
+        <span id="sos-banner-text">Distress signal received</span>
+        <button id="sos-focus" class="ghost-btn small" type="button">Go to vessel</button>
+    </div>
+</main>
+
+<section id="diagnostics-panel">
+    <div class="diag-head">
+        <span class="diag-title" id="diag-vessel">No vessel selected</span>
+        <span class="diag-sub" id="diag-fix">Pick a boat from the fleet list or tap a marker</span>
+    </div>
+    <div class="metric-grid">
+        <div class="metric-box"><div class="metric-label">Speed</div><div class="metric-value" id="diag-speed">--</div><div class="metric-unit">knots</div></div>
+        <div class="metric-box"><div class="metric-label">Heading</div><div class="metric-value" id="diag-heading">--</div><div class="metric-unit">degrees true</div></div>
+        <div class="metric-box"><div class="metric-label">Battery</div><div class="metric-value" id="diag-battery">--</div><div class="metric-unit">volts</div></div>
+        <div class="metric-box"><div class="metric-label">Position</div><div class="metric-value small" id="diag-pos">--</div><div class="metric-unit" id="diag-source">no data</div></div>
+        <div class="metric-box"><div class="metric-label">Last packet</div><div class="metric-value small" id="diag-time">--</div><div class="metric-unit" id="diag-age">--</div></div>
+    </div>
+</section>
+
+<div id="modal-root" class="modal-root" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <h2 id="modal-title">Confirm</h2>
+        <div id="modal-body"></div>
+        <div class="modal-actions">
+            <button id="modal-cancel" class="ghost-btn" type="button">Cancel</button>
+            <button id="modal-confirm" class="solid-btn" type="button">Confirm</button>
+        </div>
+    </div>
+</div>
+
+<div id="toast-stack" class="toast-stack"></div>
+
+<script src="lib/leaflet/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
