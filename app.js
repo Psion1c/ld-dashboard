@@ -1,33 +1,32 @@
 /* ═══════════════════════════════════════════════════════════
    Lantaw-Dagat — shoreline monitoring station (browser side)
-   Configured for NORMAL, STALE (180 s timeout), and SOS LKL Pinning
+   Isolated 3-State Demo: NORMAL, STALE (>180s), & SOS LKL Pin
    ═══════════════════════════════════════════════════════════ */
 
 (function () {
 "use strict";
 
 // ── Tuning ──────────────────────────────────────────────────
-const TRAIL_POINTS  = 60;     // breadcrumb points kept per vessel
-const COMET_POINTS  = 10;     // how many get the bright "recent" line
-const MIN_MOVE_M    = 8;      // ignore GPS jitter smaller than this (m)
-const ICON_PX       = 46;     // on-screen icon size
-const TTL_SEC       = 900;    // marker drops after this long with no update
-const TTL_SOS_SEC   = 3600;   // SOS markers linger much longer
-const STALE_SEC     = 180;    // 180 s timeout for STALE state verification
-const SHOW_LABEL    = true;   // keep vessel labels visible for screenshots
+const TRAIL_POINTS  = 60;
+const COMET_POINTS  = 10;
+const MIN_MOVE_M    = 8;
+const ICON_PX       = 46;
+const TTL_SEC       = 900;
+const TTL_SOS_SEC   = 3600;
+const STALE_SEC     = 180;    // 180 s timeout threshold
+const SHOW_LABEL    = true;
 
-const NO_FIX_FALLBACK = "home";            // "home" | "null" | "drop"
-const HOME_POS        = [10.3157, 123.8854]; // Cebu City base station
+const NO_FIX_FALLBACK  = "home";
+const HOME_POS         = [10.3157, 123.8854];
 const MAP_NOFIX_NORMAL = false;
 
-const WS_URL       = "ws://localhost:1880/ws/telemetry";
-const WS_RETRY_MS  = 4000;
+const WS_URL      = "ws://localhost:1880/ws/telemetry";
+const WS_RETRY_MS = 4000;
 
 const RTP_COMMAND = "RTP";
 const RTP_REPEATS = 3;
 const RTP_GAP_MS  = 1200;
 
-// Inject styling for the explicit STALE badge so no CSS file edit is required
 const staleStyle = document.createElement("style");
 staleStyle.textContent = `
   .status-tag.status-stale {
@@ -36,7 +35,7 @@ staleStyle.textContent = `
       border: 1px solid rgba(245, 158, 11, 0.45);
   }
   .vessel-item.stale {
-      opacity: 0.72;
+      opacity: 0.78;
       border-left: 3px solid #f59e0b;
   }
   .diag-sub.warn {
@@ -47,7 +46,7 @@ staleStyle.textContent = `
 document.head.appendChild(staleStyle);
 
 // ── Map ─────────────────────────────────────────────────────
-const map = L.map('map-container').setView([10.326, 123.928], 13);
+const map = L.map('map-container').setView([10.305, 123.968], 13);
 
 L.tileLayer('./tiles-wiki/{z}/{x}/{y}.png', {
     minZoom: 11,
@@ -92,8 +91,9 @@ const escapeHtml = (s) => String(s).replace(/[&<>"']/g,
 // ── Fleet state ─────────────────────────────────────────────
 const fleet = Object.create(null);
 let selectedId = null;
+let demoTimer = null;
+let demoTick = 0;
 
-// ── Time helpers ────────────────────────────────────────────
 function formatManilaTime(ms) {
     return new Date(ms).toLocaleTimeString("en-PH", {
         hour: "2-digit", minute: "2-digit", second: "2-digit",
@@ -135,6 +135,9 @@ function parseRawPacket(text) {
 }
 
 function handleMessage(raw) {
+    // Ignore background Node-RED WebSocket packets while Demo Feed is running
+    if (demoTimer) { return; }
+
     let data;
     try {
         data = typeof raw === "string" ? JSON.parse(raw) : raw;
@@ -185,7 +188,6 @@ function ingest(data) {
         heard: 0, missed: 0, lastSeq: null, backlogCount: 0
     });
 
-    // ── PDR & Sequence Gap Tracking ─────────────────────────
     const pktType = data.packetType || (data.source === "Backlog" ? "BACKLOG" : "LIVE");
     const seqNum = (data.seq !== undefined && data.seq !== null && isFinite(Number(data.seq)))
                    ? Number(data.seq) : null;
@@ -229,7 +231,6 @@ function ingest(data) {
     state.rssi       = (data.rssi !== undefined && data.rssi !== "N/A") ? data.rssi : (state.rssi ?? "--");
     state.snr        = (data.snr  !== undefined && data.snr  !== "N/A") ? data.snr  : (state.snr  ?? "--");
 
-    // ── Speed & Bearing from GPS Trail ──────────────────────
     if (!noFix) {
         let movedM = null;
         if (state.pts.length) {
@@ -249,7 +250,6 @@ function ingest(data) {
         }
     }
 
-    // ── Position & Last Known Location (LKL) Pinning ────────
     let lat, lon, posSource, fixAgeMin = null;
 
     if (!noFix) {
@@ -257,7 +257,7 @@ function ingest(data) {
         posSource = sos ? "SOS Pinned (GPS Fix)" : "GPS fix";
     } else if (state.pts.length) {
         [lat, lon] = state.pts[state.pts.length - 1];
-        posSource = sos ? "SOS — Last Known Location Pinned" : "Last known";
+        posSource = sos ? "SOS LKL PINNED" : "Last known";
         if (state.t) { fixAgeMin = Math.max(1, Math.round((now - state.t) / 60000)); }
     } else if (NO_FIX_FALLBACK === "home") {
         [lat, lon] = HOME_POS;
@@ -285,10 +285,10 @@ function ingest(data) {
     state.stamp      = data.timestamp || formatManilaTime(now);
     state.lastSeen   = now;
 
-    if (!noFix && data.heading !== undefined && isFinite(Number(data.heading)) && Number(data.heading) !== 0) {
+    if (data.heading !== undefined && isFinite(Number(data.heading)) && Number(data.heading) !== 0) {
         state.brg = Number(data.heading);
     }
-    if (!noFix && data.speed !== undefined && isFinite(Number(data.speed)) && Number(data.speed) !== 0) {
+    if (data.speed !== undefined && isFinite(Number(data.speed))) {
         state.kts = Number(data.speed);
     }
 
@@ -302,7 +302,7 @@ function ingest(data) {
     if (sos) { raiseSos(id); }
 }
 
-// ── The boat SVG (2 Hz strobe = 0.5s pulse on SOS) ──────────
+// ── The boat SVG (2 Hz strobe on SOS) ───────────────────────
 function pumpboatIcon(deg, distress, moving, nofix) {
     const hull    = distress ? "#7f1d1d" : "#12435f";
     const deck    = distress ? "#fde7e7" : "#e6f4f7";
@@ -331,7 +331,7 @@ function pumpboatIcon(deg, distress, moving, nofix) {
       <path d="M36.5 57 q2.5 2.5 3.5 5"/>
     </g>` : "";
 
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+    return `<svg xmlns="http://www.w3.org/svg" viewBox="0 0 64 64" width="64" height="64">
   ${pulse}
   <g transform="rotate(${deg} 32 32)" opacity="${nofix ? "0.9" : "1"}">
     ${wake}
@@ -364,14 +364,14 @@ function buildPopup(id, st) {
     const ageS = Math.max(0, Math.round((Date.now() - (st.lastSeen || 0)) / 1000));
     const stale = !sos && ageS >= STALE_SEC;
     const heading = Math.round(st.brg);
-    const knots = noFix ? 0 : st.kts;
+    const knots = (noFix || stale) ? 0 : st.kts;
 
     const chipBg = sos ? "#fee2e2" : stale ? "#fef3c7" : "#dcfce7";
     const chipFg = sos ? "#991b1b" : stale ? "#92400e" : "#166534";
     const chipText = sos
         ? (noFix ? "SOS — LKL PINNED" : "SOS ACTIVE (2 Hz)")
         : stale
-        ? `STALE (${ageS}s > ${STALE_SEC}s)`
+        ? `STALE (${ageS}s > ${STALE_SEC}s TIMEOUT)`
         : "NORMAL (ACTIVE)";
 
     const row = (k, v) =>
@@ -382,22 +382,24 @@ function buildPopup(id, st) {
   <div style="margin:8px 0 4px;padding:6px 9px;border-radius:6px;background:#fef2f2;
               border:1px solid #f87171;color:#7f1d1d;font-size:11.5px;line-height:1.35">
     <b>SOS LAST KNOWN LOCATION PINNED</b><br>
-    Marker locked at last confirmed GPS coordinate (${st.lat.toFixed(5)}, ${st.lon.toFixed(5)}) with ${st.pts.length}-point historical track retained.
+    Marker locked at last confirmed coordinate (${st.lat.toFixed(5)}, ${st.lon.toFixed(5)}) with ${st.pts.length}-point historical polyline retained.
   </div>` : stale ? `
   <div style="margin:8px 0 4px;padding:6px 9px;border-radius:6px;background:#fffbeb;
               border:1px solid #fbbf24;color:#78350f;font-size:11.5px;line-height:1.35">
     <b>CONNECTION STALE (&gt;${STALE_SEC} s TIMEOUT)</b><br>
-    No telemetry received for <b>${ageS} s</b>. Retaining last known position and ${st.pts.length}-point track history.
+    No telemetry received for <b>${ageS} s</b>. Preserving last known position and ${st.pts.length}-point track history.
   </div>` : "";
 
     const posText = noFix
         ? `${st.lat.toFixed(5)}, ${st.lon.toFixed(5)} <span style="color:#dc2626">(LKL Pinned)</span>`
+        : stale
+        ? `${st.lat.toFixed(5)}, ${st.lon.toFixed(5)} <span style="color:#b45309">(Stale)</span>`
         : `${st.lat.toFixed(5)}, ${st.lon.toFixed(5)}`;
 
     const pdrText = st.pdr !== undefined ? `${st.pdr.toFixed(1)}% (${st.heard} ok / ${st.missed} lost)` : "--";
     const rfText  = st.rssi !== "--" ? `${st.rssi} dBm / ${st.snr} dB` : "--";
 
-    return `<div style="font:13px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;min-width:235px">
+    return `<div style="font:13px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;min-width:240px">
   <div style="display:flex;align-items:center;gap:8px;padding-bottom:7px;border-bottom:1px solid #e2e8f0">
     <span style="font-size:17px">${sos ? "🆘" : stale ? "⚠️" : "⛵"}</span>
     <b style="font-size:14px;letter-spacing:.4px;color:#0f172a">${escapeHtml(id)}</b>
@@ -408,13 +410,13 @@ function buildPopup(id, st) {
   </div>
   ${statusBanner}
   <table style="border-collapse:collapse;font-size:12px;margin-top:6px">
-    ${row("State", sos ? "SOS (LKL Pinned)" : stale ? "STALE (Timeout)" : "NORMAL")}
+    ${row("State", sos ? "SOS (LKL Pinned)" : stale ? "STALE (180s Timeout)" : "NORMAL")}
     ${row("Position", posText)}
     ${row("Track History", `${st.pts.length} waypoints plotted`)}
     ${row("PDR", pdrText)}
     ${row("Signal", rfText)}
     ${row("Route", st.route || `${st.hops ?? 0} hops`)}
-    ${row("Heading / Spd", noFix ? "Pinned (0.0 kn)" : `${heading}&deg; &middot; ${knots.toFixed(1)} kn`)}
+    ${row("Heading / Spd", (noFix || stale) ? `${heading}&deg; &middot; 0.0 kn` : `${heading}&deg; &middot; ${knots.toFixed(1)} kn`)}
     ${row("Last Packet", `${st.stamp} (${ageS}s ago)`)}
   </table>
 </div>`;
@@ -469,7 +471,7 @@ function draw(id, st) {
         const trackColor = st.sos ? "#fca5a5" : stale ? "#fcd34d" : "#7dd3fc";
         const wakeColor  = st.sos ? "#ef4444" : stale ? "#f59e0b" : "#22d3ee";
 
-        const trackStyle = { color: trackColor, weight: 2.5, opacity: 0.65,
+        const trackStyle = { color: trackColor, weight: 2.5, opacity: 0.7,
                              dashArray: "4 6", interactive: false };
         if (!st.track) {
             st.track = L.polyline(st.pts, trackStyle);
@@ -500,7 +502,6 @@ function removeVessel(id) {
     if (selectedId === id) { selectedId = null; clearDiagnostics(); }
 }
 
-// 1-second sweep so STALE age counters and popups update in real time
 setInterval(() => {
     const now = Date.now();
     let changed = false;
@@ -600,7 +601,8 @@ function select(id) {
     renderFleet();
     renderDiagnostics(id);
     const st = fleet[id];
-    map.panTo([st.lat, st.lon], { animate: true });
+    // Zoom to 14 and offset slightly north so the popup and track polyline are framed dead-center
+    map.setView([st.lat + 0.004, st.lon], 14, { animate: true });
     if (st.marker) { st.marker.openPopup(); }
 }
 
@@ -610,7 +612,7 @@ function clearDiagnostics() {
     $("diag-fix").className = "diag-sub";
     ["diag-pdr", "diag-rssi", "diag-hops", "diag-seq", "diag-speed", "diag-heading", "diag-pos", "diag-time"]
         .forEach((k) => { if ($(k)) $(k).textContent = "--"; });
-    if ($("diag-pkt-counts")) $("diag-pkt-counts").textContent = "0 heard \u00B7 0 missed";
+    if ($("diag-pkt-counts")) $("diag-pkt-counts").textContent = "0 ok \u00B7 0 lost";
     if ($("diag-snr"))        $("diag-snr").textContent = "SNR: -- dB";
     if ($("diag-route"))      $("diag-route").textContent = "hop count";
     if ($("diag-pkt-type"))   $("diag-pkt-type").textContent = "packet stream";
@@ -646,7 +648,7 @@ function renderDiagnostics(id) {
         $("diag-pdr").textContent = st.pdr !== undefined ? `${st.pdr.toFixed(1)}%` : "100.0%";
     }
     if ($("diag-pkt-counts")) {
-        $("diag-pkt-counts").textContent = `${st.heard ?? 1} ok \u00B7 ${st.missed ?? 0} lost \u00B7 ${st.pts.length} pts`;
+        $("diag-pkt-counts").textContent = `${st.heard ?? 1} OK \u00B7 ${st.missed ?? 0} LOST (${st.pts.length} PTS)`;
     }
 
     if ($("diag-rssi")) {
@@ -660,26 +662,26 @@ function renderDiagnostics(id) {
         $("diag-hops").textContent = st.hops !== undefined ? `${st.hops}` : "0";
     }
     if ($("diag-route")) {
-        $("diag-route").textContent = st.hops === 0 ? "Direct to Gateway" : `Relayed (${st.hops} ${st.hops === 1 ? "hop" : "hops"})`;
+        $("diag-route").textContent = st.hops === 0 ? "Direct to Gateway" : `Relayed (${st.hops} ${st.hops === 1 ? "Hop" : "Hops"})`;
     }
 
     if ($("diag-seq")) {
         $("diag-seq").textContent = st.seq !== null && st.seq !== undefined ? `#${st.seq}` : "--";
     }
     if ($("diag-pkt-type")) {
-        $("diag-pkt-type").textContent = st.sos ? "SOS Priority" : stale ? "Stale (>180s)" : "Live ('P' pkt)";
+        $("diag-pkt-type").textContent = st.sos ? "SOS Priority" : stale ? "Stale (>180s)" : "Live ('P' Pkt)";
     }
 
-    $("diag-speed").textContent   = st.noFix ? "0.0" : st.kts.toFixed(1);
+    $("diag-speed").textContent   = (st.noFix || stale) ? "0.0" : st.kts.toFixed(1);
     $("diag-heading").textContent = Math.round(st.brg) + "\u00B0";
     $("diag-pos").textContent     = st.lat.toFixed(5) + ", " + st.lon.toFixed(5);
-    $("diag-source").textContent  = st.posSource || "--";
+    $("diag-source").textContent  = st.sos ? "SOS LKL PINNED" : stale ? "LAST KNOWN (STALE)" : (st.posSource || "GPS FIX");
     $("diag-time").textContent    = st.stamp || "--";
     $("diag-age").textContent     = stale
-        ? `${ageS} s ago (STALE >180s)`
+        ? `${ageS}s AGO (STALE >180s)`
         : st.sos
-        ? `${ageS} s ago (SOS PINNED)`
-        : `${ageS} s ago (NORMAL)`;
+        ? `${ageS}s AGO (SOS PINNED)`
+        : `${ageS}s AGO (NORMAL)`;
 
     document.querySelectorAll(".metric-box").forEach((b) => {
         b.classList.toggle("alert", !!st.sos);
@@ -714,7 +716,7 @@ function setLink(kind, text) {
 }
 
 function connect() {
-    setLink("down", "Connecting");
+    if (!demoTimer) { setLink("down", "Connecting"); }
     try {
         ws = new WebSocket(WS_URL);
     } catch (err) {
@@ -723,10 +725,11 @@ function connect() {
     }
 
     ws.onopen = () => {
-        setLink("up", "Gateway live");
-        $("rtp-btn").disabled = false;
-        if (demoTimer) { stopDemo(); }
-        toast("Shoreline gateway connected", "good");
+        if (!demoTimer) {
+            setLink("up", "Gateway live");
+            $("rtp-btn").disabled = false;
+            toast("Shoreline gateway connected", "good");
+        }
     };
     ws.onmessage = (event) => handleMessage(event.data);
     ws.onerror = () => {};
@@ -759,7 +762,7 @@ $("rtp-btn").addEventListener("click", () => {
 });
 
 function sendRtp() {
-    if (demoTimer && (!ws || ws.readyState !== WebSocket.OPEN)) {
+    if (demoTimer) {
         toast("RTP command simulated across demo fleet (3x broadcast)", "good");
         return;
     }
@@ -889,54 +892,54 @@ function toast(text, kind) {
 setInterval(() => { $("station-clock").textContent = nowStamp(); }, 1000);
 $("station-clock").textContent = nowStamp();
 
-// ── 3-State Evidence Demo (All Vessels & Tracks in Open Water) ──
-let demoTimer = null;
-let demoTick = 0;
-
+// ── 3-State Evidence Demo (All Vessels & Curved Tracks in Open Water) ──
 const demoBoats = [
     {
-        // South Cebu Harbor / Bohol Strait approach (open water between SRP & Cordova)
+        // VESSEL1 (NORMAL): Sailing south-southwest in South Cebu Harbor
         id: "VESSEL1",
         role: "NORMAL",
-        lat: 10.2620, lon: 123.9080, brg: 200, kts: 5.4, seq: 112, hops: 0, rssi: -68, snr: 9.8,
+        lat: 10.2640, lon: 123.9085, brg: 202, kts: 5.4, seq: 112, hops: 0, rssi: -68, snr: 9.8,
         history: [
-            [10.2820, 123.9165], [10.2795, 123.9154], [10.2770, 123.9143],
-            [10.2745, 123.9132], [10.2720, 123.9122], [10.2695, 123.9112],
-            [10.2670, 123.9101], [10.2645, 123.9090], [10.2620, 123.9080]
+            [10.2815, 123.9182], [10.2794, 123.9165], [10.2772, 123.9151],
+            [10.2750, 123.9140], [10.2728, 123.9128], [10.2706, 123.9115],
+            [10.2684, 123.9104], [10.2662, 123.9094], [10.2640, 123.9085]
         ]
     },
     {
-        // Hilutungan Channel (wide open water between Mactan Island & Olango Island)
+        // VESSEL2 (SOS_PINNED): Curved track in Hilutungan Channel, pinned at Last Known Location
         id: "VESSEL2",
         role: "SOS_PINNED",
-        lat: 10.2985, lon: 124.0245, brg: 32, kts: 4.1, seq: 214, hops: 1, rssi: -85, snr: 2.4,
+        lat: 10.2965, lon: 124.0210, brg: 38, kts: 0.0, seq: 214, hops: 1, rssi: -85, snr: 2.4,
         history: [
-            [10.2720, 124.0080], [10.2744, 124.0095], [10.2768, 124.0110],
-            [10.2792, 124.0125], [10.2816, 124.0140], [10.2840, 124.0155],
-            [10.2864, 124.0170], [10.2888, 124.0185], [10.2912, 124.0200],
-            [10.2936, 124.0215], [10.2960, 124.0230], [10.2985, 124.0245]
+            [10.2750, 124.0020], [10.2768, 124.0042], [10.2788, 124.0060],
+            [10.2810, 124.0076], [10.2832, 124.0095], [10.2852, 124.0116],
+            [10.2874, 124.0135], [10.2895, 124.0152], [10.2915, 124.0168],
+            [10.2932, 124.0182], [10.2949, 124.0196], [10.2965, 124.0210]
         ]
     },
     {
-        // Magellan Bay (open water northeast of Mactan / Punta Engaño)
+        // VESSEL3 (STALE_180S): Curved track in Magellan Bay, silent for >180 s
         id: "VESSEL3",
         role: "STALE_180S",
-        lat: 10.3450, lon: 124.0220, brg: 135, kts: 3.6, seq: 308, hops: 2, rssi: -92, snr: -3.8,
+        lat: 10.3480, lon: 124.0210, brg: 132, kts: 0.0, seq: 308, hops: 2, rssi: -92, snr: -3.8,
         history: [
-            [10.3625, 124.0045], [10.3600, 124.0070], [10.3575, 124.0095],
-            [10.3550, 124.0120], [10.3525, 124.0145], [10.3500, 124.0170],
-            [10.3475, 124.0195], [10.3450, 124.0220]
+            [10.3620, 124.0030], [10.3602, 124.0058], [10.3582, 124.0082],
+            [10.3564, 124.0108], [10.3545, 124.0135], [10.3524, 124.0160],
+            [10.3502, 124.0186], [10.3480, 124.0210]
         ]
     }
 ];
 
 function seedDemoHistories() {
+    // Clear any existing Node-RED vessels so they never contaminate the demo
+    Object.keys(fleet).forEach((id) => removeVessel(id));
+
     const now = Date.now();
 
     demoBoats.forEach((b) => {
         fleet[b.id] = {
             pts: b.history.map((pt) => [pt[0], pt[1]]),
-            t: b.role === "STALE_180S" ? now - 183000 : now - 4000,
+            t: b.role === "STALE_180S" ? now - 184000 : now - 4000,
             brg: b.brg,
             kts: b.kts,
             heard: b.history.length,
@@ -946,7 +949,7 @@ function seedDemoHistories() {
         };
     });
 
-    // 1. Ingest VESSEL1 (NORMAL active state in South Cebu Harbor)
+    // 1. VESSEL1 (NORMAL)
     const b1 = demoBoats[0];
     ingest({
         id: b1.id, seq: b1.seq, hops: b1.hops, rssi: b1.rssi, snr: b1.snr,
@@ -954,21 +957,22 @@ function seedDemoHistories() {
         timestamp: formatManilaTime(now), customLastSeen: now, source: "Live"
     });
 
-    // 2. Ingest VESSEL2 (SOS with lost GPS fix 0,0 -> pins Last Known Location in Hilutungan Channel)
+    // 2. VESSEL2 (SOS LKL Pinned)
     const b2 = demoBoats[1];
+    const sosTimeMs = now - 18 * 1000;
     ingest({
         id: b2.id, seq: b2.seq, hops: b2.hops, rssi: b2.rssi, snr: b2.snr,
         lat: 0, lon: 0, status: "SOS", speed: 0.0, heading: b2.brg,
-        positionSource: "SOS — Last Known Location Pinned",
-        timestamp: formatManilaTime(now), customLastSeen: now, source: "Live"
+        positionSource: "SOS LKL PINNED",
+        timestamp: formatManilaTime(sosTimeMs), customLastSeen: sosTimeMs, source: "Live"
     });
 
-    // 3. Ingest VESSEL3 (STALE state -> backdated 183 s ago in Magellan Bay)
+    // 3. VESSEL3 (STALE >180s Timeout)
     const b3 = demoBoats[2];
-    const staleTimeMs = now - 183 * 1000;
+    const staleTimeMs = now - 184 * 1000;
     ingest({
         id: b3.id, seq: b3.seq, hops: b3.hops, rssi: b3.rssi, snr: b3.snr,
-        lat: b3.lat, lon: b3.lon, status: "Normal", speed: b3.kts, heading: b3.brg,
+        lat: b3.lat, lon: b3.lon, status: "Normal", speed: 0.0, heading: b3.brg,
         timestamp: formatManilaTime(staleTimeMs), customLastSeen: staleTimeMs, source: "Live"
     });
 }
@@ -977,9 +981,9 @@ function stepDemo() {
     demoTick++;
     const now = Date.now();
 
-    // Update VESSEL1 (NORMAL): sails south-southwest deeper into the open Cebu Strait
+    // Only VESSEL1 moves; VESSEL2 stays pinned at LKL and VESSEL3 stays STALE (>180s)
     const b1 = demoBoats[0];
-    b1.brg = 200 + (Math.random() * 4 - 2);
+    b1.brg = 202 + (Math.random() * 4 - 2);
     const dM = b1.kts * 0.5144 * 2.2 * 3;
     b1.lat += (dM * Math.cos(rad(b1.brg))) / 111320;
     b1.lon += (dM * Math.sin(rad(b1.brg))) / (111320 * Math.cos(rad(b1.lat)));
@@ -993,34 +997,19 @@ function stepDemo() {
         speed: b1.kts.toFixed(1), heading: Math.round(b1.brg),
         timestamp: formatManilaTime(now), source: "Live"
     });
-
-    // Update VESSEL2 (SOS_PINNED): continues broadcasting SOS while pinned at Last Known Location
-    const b2 = demoBoats[1];
-    b2.seq++;
-    ingest({
-        id: b2.id, seq: b2.seq, hops: b2.hops,
-        rssi: b2.rssi + Math.floor(Math.random() * 3 - 1),
-        snr: Number((b2.snr + (Math.random() * 0.6 - 0.3)).toFixed(1)),
-        lat: 0, lon: 0, status: "SOS",
-        speed: 0.0, heading: Math.round(b2.brg),
-        positionSource: "SOS — Last Known Location Pinned",
-        timestamp: formatManilaTime(now), source: "Live"
-    });
-
-    // VESSEL3 (STALE_180S) remains silent so its elapsed time stays >180 s
 }
 
 function startDemo() {
     if (demoTimer) { return; }
     demoTick = 0;
-    seedDemoHistories();
+    // Set demoTimer truthy before seeding so WebSocket traffic is immediately blocked
     demoTimer = setInterval(stepDemo, 2000);
+    seedDemoHistories();
     $("demo-toggle").textContent = "Stop demo feed";
     $("rtp-btn").disabled = false;
     setLink("demo", "Demo data");
-    map.setView([10.305, 123.968], 13);
     select("VESSEL1");
-    toast("Demo active: VESSEL1 (NORMAL), VESSEL2 (SOS LKL Pinned), VESSEL3 (STALE >180s)", "good");
+    toast("Demo active: Click VESSEL1 (NORMAL), VESSEL2 (SOS Pin), or VESSEL3 (STALE >180s)", "good");
 }
 
 function stopDemo() {
@@ -1032,6 +1021,8 @@ function stopDemo() {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
         setLink("down", "Gateway offline");
         $("rtp-btn").disabled = true;
+    } else {
+        setLink("up", "Gateway live");
     }
 }
 
