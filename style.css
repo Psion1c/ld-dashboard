@@ -391,14 +391,10 @@ body {
 /* ── Diagnostics ────────────────────────────────────────── */
 
 #diagnostics-panel {
-    grid-area: diagnostics;
-    background: var(--panel);
-    border-top: 1px solid var(--line);
-    padding: 12px 16px 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    overflow: hidden;
+    height: auto !important;
+    min-height: 110px;
+    padding: 10px 16px 12px !important;
+    overflow: visible !important;
 }
 
 .diag-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
@@ -408,28 +404,33 @@ body {
 .diag-sub.sos { color: var(--distress); }
 
 .metric-grid {
-    display: grid;
-    grid-template-columns: repeat(5, 1fr);
-    gap: 10px;
+    display: grid !important;
+    grid-template-columns: repeat(8, minmax(0, 1fr)) !important;
+    gap: 10px !important;
+    align-items: stretch;
 }
 .metric-box {
-    background: var(--panel-2);
-    border: 1px solid var(--line);
-    border-radius: var(--r-sm);
-    padding: 10px 12px;
+    min-width: 0;
+    padding: 8px 10px !important;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
 }
 .metric-label { font-size: 0.55rem; color: var(--muted); }
 .metric-value {
-    font-family: var(--mono);
-    font-size: 1.6rem;
-    font-weight: 600;
-    color: var(--wake);
-    line-height: 1.15;
-    margin-top: 4px;
-    font-variant-numeric: tabular-nums;
+    font-size: 1.25rem !important;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
-.metric-value.small { font-size: 0.95rem; }
-.metric-unit { font-size: 0.52rem; color: var(--muted); margin-top: 3px; }
+.metric-value.small {
+    font-size: 0.95rem !important;
+}
+.metric-unit {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
 .metric-box.alert { border-color: var(--distress); }
 .metric-box.alert .metric-value { color: var(--distress); }
 .metric-box.stale .metric-value { color: var(--warn); }
