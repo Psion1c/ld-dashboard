@@ -114,6 +114,157 @@ function nowStamp() {
     return formatManilaTime(Date.now());
 }
 
+
+// ── CSV Telemetry Logger (In-Memory + localStorage + 1-Click Export) ──
+const CSV_STORAGE_KEY = "lantaw_dagat_csv_log_v1";
+const CSV_MAX_ROWS    = 5000;
+const CSV_HEADERS     = [
+    "iso_timestamp", "manila_time", "vessel_id", "packet_type", "seq",
+    "hops", "route", "lat", "lon", "raw_lat", "raw_lon", "gps_fix",
+    "position_source", "status", "sos_flag", "speed_kts", "heading_deg",
+    "rssi_dbm", "snr_db", "pdr_pct", "packets_heard", "packets_missed",
+    "backlog_replayed", "feed_mode"
+];
+
+let csvLogRows = [];
+try {
+    const saved = localStorage.getItem(CSV_STORAGE_KEY);
+    if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) { csvLogRows = parsed; }
+    }
+} catch (err) {
+    csvLogRows = [];
+}
+
+function ensureCsvButtons() {
+    const topRight = document.querySelector(".topbar-right");
+    const demoBtn  = document.getElementById("demo-toggle");
+    if (topRight && !document.getElementById("csv-export")) {
+        const expBtn = document.createElement("button");
+        expBtn.id = "csv-export";
+        expBtn.className = "ghost-btn";
+        expBtn.type = "button";
+        expBtn.title = "Download logged telemetry as CSV";
+        expBtn.innerHTML = 'Export CSV (<span id="csv-count">0</span>)';
+        topRight.insertBefore(expBtn, demoBtn || null);
+    }
+    if (topRight && !document.getElementById("csv-clear")) {
+        const clrBtn = document.createElement("button");
+        clrBtn.id = "csv-clear";
+        clrBtn.className = "ghost-btn small";
+        clrBtn.type = "button";
+        clrBtn.title = "Clear stored CSV telemetry log";
+        clrBtn.textContent = "Clear log";
+        topRight.insertBefore(clrBtn, demoBtn || null);
+    }
+    updateCsvCountUI();
+}
+
+function updateCsvCountUI() {
+    const el = document.getElementById("csv-count");
+    if (el) { el.textContent = String(csvLogRows.length); }
+}
+
+function recordCsvRow(id, state, latRaw, lonRaw, noFix, sos, nowMs) {
+    const ageS = Math.max(0, Math.round((Date.now() - (state.lastSeen || nowMs)) / 1000));
+    const stale = !sos && ageS >= STALE_SEC;
+    const statusLabel = sos ? "SOS" : stale ? "STALE" : "NORMAL";
+
+    const rowObj = {
+        iso_timestamp:    new Date(nowMs).toISOString(),
+        manila_time:      state.stamp || formatManilaTime(nowMs),
+        vessel_id:        id,
+        packet_type:      state.packetType || "LIVE",
+        seq:              state.seq !== null && state.seq !== undefined ? state.seq : "",
+        hops:             state.hops ?? 0,
+        route:            state.route || "Direct (0 Hops)",
+        lat:              Number(state.lat).toFixed(6),
+        lon:              Number(state.lon).toFixed(6),
+        raw_lat:          Number(latRaw).toFixed(6),
+        raw_lon:          Number(lonRaw).toFixed(6),
+        gps_fix:          !noFix,
+        position_source:  state.posSource || "GPS fix",
+        status:           statusLabel,
+        sos_flag:         sos ? 1 : 0,
+        speed_kts:        (noFix || stale) ? "0.0" : Number(state.kts || 0).toFixed(1),
+        heading_deg:      Math.round(state.brg || 0),
+        rssi_dbm:         state.rssi !== undefined && state.rssi !== "--" ? state.rssi : "",
+        snr_db:           state.snr  !== undefined && state.snr  !== "--" ? state.snr  : "",
+        pdr_pct:          state.pdr  !== undefined ? Number(state.pdr).toFixed(1) : "100.0",
+        packets_heard:    state.heard ?? 1,
+        packets_missed:   state.missed ?? 0,
+        backlog_replayed: state.backlogCount ?? 0,
+        feed_mode:        demoTimer ? "DEMO" : "GATEWAY"
+    };
+
+    csvLogRows.push(rowObj);
+    if (csvLogRows.length > CSV_MAX_ROWS) {
+        csvLogRows = csvLogRows.slice(-CSV_MAX_ROWS);
+    }
+    try {
+        localStorage.setItem(CSV_STORAGE_KEY, JSON.stringify(csvLogRows));
+    } catch (err) {}
+    updateCsvCountUI();
+}
+
+function escapeCsvCell(val) {
+    const s = String(val ?? "");
+    if (/[",\r\n]/.test(s)) {
+        return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+}
+
+function exportCsvLog() {
+    if (!csvLogRows.length) {
+        toast("No telemetry packets logged yet to export", "warn");
+        return;
+    }
+    const lines = [CSV_HEADERS.join(",")];
+    for (let i = 0; i < csvLogRows.length; i++) {
+        const r = csvLogRows[i];
+        lines.push(CSV_HEADERS.map((h) => escapeCsvCell(r[h])).join(","));
+    }
+    // Prepend UTF-8 BOM so Excel opens degree symbols and timestamps cleanly
+    const csvContent = "\uFEFF" + lines.join("\r\n") + "\r\n";
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url  = URL.createObjectURL(blob);
+
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    const fileName = `lantaw_dagat_telemetry_${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.csv`;
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+
+    toast(`Exported ${csvLogRows.length} telemetry rows to ${fileName}`, "good");
+}
+
+function clearCsvLog() {
+    if (!csvLogRows.length) {
+        toast("CSV log is already empty", "warn");
+        return;
+    }
+    openModal({
+        title: "Clear CSV telemetry log?",
+        body: `<p>This will remove <b>${csvLogRows.length}</b> stored telemetry rows from local browser storage.</p>` +
+              `<p style="color:#7ea6ba;font-size:.8rem">Export the CSV first if you want to save a copy for your defense dataset.</p>`,
+        confirmText: "Clear log",
+        onConfirm: () => {
+            csvLogRows = [];
+            try { localStorage.removeItem(CSV_STORAGE_KEY); } catch (err) {}
+            updateCsvCountUI();
+            toast("CSV telemetry log cleared", "good");
+        }
+    });
+}
+
 // ── Ingest ──────────────────────────────────────────────────
 function parseRawPacket(text) {
     let clean = String(text).trim();
@@ -315,6 +466,7 @@ function ingest(data) {
     }
 
     draw(id, state);
+    recordCsvRow(id, state, latRaw, lonRaw, noFix, sos, now);
     renderFleet();
     if (selectedId === id) { renderDiagnostics(id); }
     if (sos) {
@@ -1056,6 +1208,9 @@ function stopDemo() {
     }
 }
 
+ensureCsvButtons();
+if ($("csv-export")) { $("csv-export").addEventListener("click", exportCsvLog); }
+if ($("csv-clear"))  { $("csv-clear").addEventListener("click", clearCsvLog); }
 $("demo-toggle").addEventListener("click", () => { demoTimer ? stopDemo() : startDemo(); });
 
 $("rtp-btn").disabled = true;

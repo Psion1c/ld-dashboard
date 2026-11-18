@@ -1,54 +1,65 @@
 // ─────────────────────────────────────────────────────────────
-//  Function 1 — Vessel tracker  (v3)
+//  Function 1 — Vessel tracker (v3.1 Defense Ready — SOS Restore Fix)
 //  Output 1 → node-red-contrib-web-worldmap
-//  Output 2 → websocket out (/ws/telemetry) → the dashboard
-//
-//  v3 changes, all for the dashboard's benefit:
-//    • output 2 now carries fix / positionSource / fixAgeMin /
-//      source, so index.html can draw exactly what worldmap draws
-//    • battery is read off the packet instead of being hard "--"
-//    • the "drop" branch still emits on output 2 (it used to go
-//      silent, so the dashboard never learned about that SOS)
-//    • every early return keeps the two-output shape
+//  Output 2 → websocket out (/ws/telemetry) → Lantaw-Dagat Dashboard
 // ─────────────────────────────────────────────────────────────
 
 // ── Tuning ───────────────────────────────────────────────────
 const TRAIL_POINTS = 60;    // total breadcrumb points kept per vessel
 const COMET_POINTS = 10;    // how many of those get the bright "recent" line
-const MIN_MOVE_M = 8;     // ignore GPS jitter smaller than this (metres)
-const ICON_PX = 46;    // on-screen icon size
-const TTL_SEC = 900;   // marker disappears after this long with no update
-const TTL_SOS_SEC = 3600;  // SOS markers linger much longer
-const SHOW_LABEL = false; // true = name always visible, false = on hover
+const MIN_MOVE_M = 8;       // ignore GPS jitter smaller than this (metres)
+const ICON_PX = 46;         // on-screen icon size
+const TTL_SEC = 900;        // marker disappears after this long with no update
+const TTL_SOS_SEC = 3600;   // SOS markers linger much longer
+const SHOW_LABEL = false;   // true = name always visible, false = on hover
 const MOVE_ON_BACKLOG = true; // let "B" packets move the live marker too
 
-// The gateway CSV is:  P/B , id , seq , hops , lat , lng , sos
-// There is no battery field in it — index 3 is the mesh hop count. Leave
-// BATT_INDEX null unless you add a volts field to the vessel packet, or the
-// dashboard will happily report "0.00 V" for every boat.
 const BATT_INDEX = null;
-
-// What to do with an SOS that has no GPS fix and NO position history:
-//   "home"  → drop it on HOME_POS below (recommended: your base station)
-//   "null"  → drop it on 0,0 (Null Island, off Africa — usually not useful)
-//   "drop"  → don't map it at all, but still send the alert message
 const NO_FIX_FALLBACK = "home";
-const HOME_POS = [10.3157, 123.8854];   // Cebu City — change to your base
-
-// Non-SOS packets with no fix are always ignored. Set true to map them too.
+const HOME_POS = [10.2928, 123.9095]; // Cebu Pier 1 coastal fallback
 const MAP_NOFIX_NORMAL = false;
 
-// ── Parse ────────────────────────────────────────────────────
-const parts = String(msg.payload).trim().split(",");
+// ── 1. Capture RSSI / SNR from Gateway '# RX' debug lines ────
+let rawLine = String(msg.payload || "").trim();
+if (!rawLine) { return [null, null]; }
+
+if (rawLine.startsWith("#")) {
+    const rssiMatch = rawLine.match(/rssi=(-?\d+)dBm/i);
+    const snrMatch  = rawLine.match(/snr=(-?[\d.]+)dB/i);
+    if (rssiMatch || snrMatch) {
+        flow.set("last_rf_metrics", {
+            rssi: rssiMatch ? Number(rssiMatch[1]) : "--",
+            snr:  snrMatch  ? Number(snrMatch[1])  : "--",
+            ts:   Date.now()
+        });
+    }
+    return [null, null];
+}
+
+// Strip "Received: " prefix if Gateway is connected via USB-C Serial (115200)
+if (rawLine.startsWith("Received:")) {
+    rawLine = rawLine.replace(/^Received:\s*/i, "").trim();
+}
+const pbMatch = rawLine.match(/([PB]),.*/);
+if (pbMatch) {
+    rawLine = pbMatch[0];
+}
+
+// ── 2. Parse CSV: P/B , id , seq , hops , lat , lng , sos ────
+const parts = rawLine.split(",");
 if (parts.length < 7) { return [null, null]; }
 if (parts[0] !== "P" && parts[0] !== "B") { return [null, null]; }
 
-const vesselId = parts[1];
+const vesselId  = parts[1].trim();
 const isBacklog = parts[0] === "B";
-const hops = parts[3];
-const latRaw = parseFloat(parts[4]);
-const lonRaw = parseFloat(parts[5]);
-const sos = parts[6] === "1";
+const seqRaw    = parseInt(parts[2], 10);
+const seqNum    = isFinite(seqRaw) ? seqRaw : null;
+const hopsRaw   = parseInt(parts[3], 10);
+const hops      = isFinite(hopsRaw) ? hopsRaw : 0;
+const latRaw    = parseFloat(parts[4]);
+const lonRaw    = parseFloat(parts[5]);
+const sosField  = String(parts[6]).trim().toUpperCase();
+const sos       = (sosField === "1" || sosField === "SOS" || sosField === "TRUE");
 
 let battery = "--";
 if (BATT_INDEX !== null && parts[BATT_INDEX] !== undefined) {
@@ -59,12 +70,47 @@ if (BATT_INDEX !== null && parts[BATT_INDEX] !== undefined) {
 if (!isFinite(latRaw) || !isFinite(lonRaw)) { return [null, null]; }
 if (Math.abs(latRaw) > 90 || Math.abs(lonRaw) > 180) { return [null, null]; }
 
-// Either coordinate being exactly zero means the module hasn't locked yet.
-// (A genuine 0.000000 is in the Atlantic/Gulf of Guinea, so this is safe here.)
 const noFix = (latRaw === 0 || lonRaw === 0);
 
-// A no-fix ping is only interesting if it's a distress call.
-if (noFix && !sos && !MAP_NOFIX_NORMAL) { return [null, null]; }
+// ── History (per vessel, kept in flow context) ───────────────
+const KEY = "wake_" + vesselId;
+const now = Date.now();
+const state = flow.get(KEY) || { pts: [], t: 0, brg: 0, kts: 0, rssi: "--", snr: "--", sos: false, mapped: false, heard: 0, missed: 0, lastSeq: null, backlogCount: 0, pdr: 100.0 };
+const wasSos = !!state.sos;
+const wasMapped = !!state.mapped;
+
+// Allow a no-fix packet through if the vessel is clearing an active SOS or is already mapped
+if (noFix && !sos && !wasSos && !wasMapped && !MAP_NOFIX_NORMAL) { return [null, null]; }
+
+// Read most recent RSSI/SNR captured within the last 3 seconds
+const lastRf = flow.get("last_rf_metrics") || null;
+const pktRssi = (lastRf && (Date.now() - lastRf.ts) < 3000) ? lastRf.rssi : "--";
+const pktSnr  = (lastRf && (Date.now() - lastRf.ts) < 3000) ? lastRf.snr  : "--";
+
+if (pktRssi !== "--") { state.rssi = pktRssi; }
+if (pktSnr  !== "--") { state.snr  = pktSnr; }
+state.sos = sos;
+
+if (seqNum !== null) {
+    if (!isBacklog) {
+        if (state.lastSeq !== null) {
+            if (seqNum > state.lastSeq) {
+                const gap = seqNum - state.lastSeq - 1;
+                if (gap > 0 && gap < 200) { state.missed = (state.missed || 0) + gap; }
+            } else if (seqNum < state.lastSeq) {
+                state.heard = 0; state.missed = 0;
+            }
+        }
+        state.lastSeq = seqNum;
+        state.heard = (state.heard || 0) + 1;
+    } else {
+        state.backlogCount = (state.backlogCount || 0) + 1;
+    }
+} else {
+    state.heard = (state.heard || 0) + 1;
+}
+const expectedPkts = (state.heard || 0) + (state.missed || 0);
+state.pdr = expectedPkts > 0 ? Number(((state.heard / expectedPkts) * 100).toFixed(1)) : 100.0;
 
 // ── Geo helpers ──────────────────────────────────────────────
 const rad = (d) => d * Math.PI / 180;
@@ -85,12 +131,6 @@ function bearingBetween(la1, lo1, la2, lo2) {
     return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 }
 
-// ── History (per vessel, kept in flow context) ───────────────
-const KEY = "wake_" + vesselId;
-const now = Date.now();
-const state = flow.get(KEY) || { pts: [], t: 0, brg: 0, kts: 0 };
-
-// Only real fixes are allowed to touch the trail, bearing and speed.
 if (!noFix) {
     let movedM = null;
     if (state.pts.length) {
@@ -108,7 +148,6 @@ if (!noFix) {
         state.pts.push([latRaw, lonRaw]);
         if (state.pts.length > TRAIL_POINTS) { state.pts = state.pts.slice(-TRAIL_POINTS); }
         state.t = now;
-        flow.set(KEY, state);
     }
 }
 
@@ -124,13 +163,22 @@ function dashboardMsg(o) {
         topic: "vessel/telemetry",
         payload: {
             id: vesselId,
+            seq: seqNum,
+            hops: hops,
+            rssi: state.rssi,
+            snr: state.snr,
+            pdr: state.pdr,
+            packetsHeard: state.heard,
+            packetsMissed: state.missed,
+            backlogReplayed: state.backlogCount,
+            packetType: isBacklog ? "BACKLOG" : "LIVE",
             lat: o.lat,
             lon: o.lon,
             status: sos ? "SOS" : "Normal",
-            speed: o.knots === null ? "--" : o.knots.toFixed(1),
+            sos: sos,
+            speed: o.knots === null ? "--" : Number(o.knots.toFixed(1)),
             heading: o.heading,
             battery: battery,
-            hops: hops,
             timestamp: stamp,
             fix: !noFix,
             positionSource: o.posSource,
@@ -147,11 +195,11 @@ let lat, lon, posSource, fixAgeMin = null;
 
 if (!noFix) {
     lat = latRaw; lon = lonRaw;
-    posSource = "GPS fix";
+    posSource = sos ? "SOS Pinned (GPS Fix)" : "GPS fix";
 } else if (state.pts.length) {
     [lat, lon] = state.pts[state.pts.length - 1];
-    posSource = "Last known";
-    if (state.t) { fixAgeMin = Math.round((now - state.t) / 60000); }
+    posSource = sos ? "SOS LKL PINNED" : "Last known";
+    if (state.t) { fixAgeMin = Math.max(1, Math.round((now - state.t) / 60000)); }
 } else if (NO_FIX_FALLBACK === "home") {
     [lat, lon] = HOME_POS;
     posSource = "No fix - base station";
@@ -159,8 +207,8 @@ if (!noFix) {
     lat = 0; lon = 0;
     posSource = "No fix - 0,0";
 } else {
-    // "drop": nothing on the map, but the alert and the dashboard
-    // still hear about it — a silent SOS is the worst outcome here.
+    state.mapped = false;
+    flow.set(KEY, state);
     const alert = {
         topic: "vessel/alert",
         payload: {
@@ -176,13 +224,14 @@ if (!noFix) {
     ];
 }
 
+state.mapped = true;
+flow.set(KEY, state);
+
 const heading = Math.round(state.brg);
 const knots = noFix ? 0 : state.kts;
 const underway = knots > 0.3;
 
-// ── The boat ─────────────────────────────────────────────────
-// Top-down bangka: hull, bamboo outriggers (katig), canopy, wake.
-// Rotation is baked into the SVG so it works on any worldmap version.
+// ── The boat SVG ─────────────────────────────────────────────
 function pumpboatIcon(deg, distress, moving, nofix) {
     const hull = distress ? "#7f1d1d" : "#12435f";
     const deck = distress ? "#fde7e7" : "#e6f4f7";
@@ -196,7 +245,6 @@ function pumpboatIcon(deg, distress, moving, nofix) {
       <animate attributeName="opacity" values="0.85;0;0.85" dur="1.6s" repeatCount="indefinite"/>
     </circle>` : "";
 
-    // Dashed ring + "?" badge = position is not trustworthy.
     const fixWarn = nofix ? `
     <circle cx="32" cy="32" r="22" fill="none" stroke="#94a3b8" stroke-width="2"
             stroke-dasharray="4 5" opacity="0.95"/>
@@ -212,7 +260,7 @@ function pumpboatIcon(deg, distress, moving, nofix) {
       <path d="M36.5 57 q2.5 2.5 3.5 5"/>
     </g>` : "";
 
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="${ICON_PX}" height="${ICON_PX}" style="display:block">
   ${pulse}
   <g transform="rotate(${deg} 32 32)" opacity="${nofix ? "0.75" : "1"}">
     ${wake}
@@ -281,7 +329,8 @@ const popup = `<div style="font:13px/1.45 system-ui,-apple-system,Segoe UI,Robot
     ${row("Heading", noFix ? "&mdash;" : `${heading}&deg;`)}
     ${row("Speed", noFix ? "&mdash;" : `${knots.toFixed(1)} kn`)}
     ${row("Relay hops", hops === undefined ? "&mdash;" : hops)}
-    ${row("Battery", battery === "--" ? "&mdash;" : battery + " V")}
+    ${row("Signal", state.rssi === "--" ? "&mdash;" : `${state.rssi} dBm (${state.snr} dB)`)}
+    ${row("Sequence", seqNum === null ? "&mdash;" : `#${seqNum}`)}
     ${row("Source", isBacklog ? "Backlog" : "Live")}
     ${row("Updated", stamp)}
   </table>
@@ -291,8 +340,14 @@ const popup = `<div style="font:13px/1.45 system-ui,-apple-system,Segoe UI,Robot
 const out = [];
 const pts = state.pts;
 
+// If transitioning between Vessels and Distress layers on worldmap, delete old layer marker
+if (wasSos && !sos) {
+    out.push({ payload: { name: vesselId, layer: "Distress", deleted: true } });
+} else if (!wasSos && sos && wasMapped) {
+    out.push({ payload: { name: vesselId, layer: "Vessels", deleted: true } });
+}
+
 if (pts.length > 1) {
-    // Full history: thin, dashed, faded.
     out.push({
         payload: {
             name: vesselId + " track",
@@ -306,7 +361,6 @@ if (pts.length > 1) {
         }
     });
 
-    // Recent leg: brighter and thicker, so it reads as a comet tail.
     out.push({
         payload: {
             name: vesselId + " wake",
@@ -337,7 +391,6 @@ if (!isBacklog || MOVE_ON_BACKLOG) {
     out.push({ payload: marker });
 }
 
-// Machine-readable alert for buzzers / SMS / logging nodes downstream.
 if (sos) {
     out.push({
         topic: "vessel/alert",
