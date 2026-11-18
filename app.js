@@ -17,7 +17,7 @@ const STALE_SEC     = 180;    // 180 s timeout threshold
 const SHOW_LABEL    = true;
 
 const NO_FIX_FALLBACK  = "home";
-const HOME_POS         = [10.3157, 123.8854];
+const HOME_POS         = [10.2928, 123.9095]; // Coastal fallback (Cebu Pier 1)
 const MAP_NOFIX_NORMAL = false;
 
 const WS_URL      = "ws://localhost:1880/ws/telemetry";
@@ -42,6 +42,11 @@ staleStyle.textContent = `
       color: #fbbf24 !important;
       font-weight: 600;
   }
+  .bangka-icon svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+  }
 `;
 document.head.appendChild(staleStyle);
 
@@ -65,6 +70,10 @@ L.control.scale({ imperial: false, position: "bottomleft" }).addTo(map);
 
 setTimeout(() => map.invalidateSize(), 200);
 window.addEventListener("resize", () => map.invalidateSize());
+const mapContainerEl = document.getElementById("map-container");
+if (window.ResizeObserver && mapContainerEl) {
+    new ResizeObserver(() => map.invalidateSize({ pan: false })).observe(mapContainerEl);
+}
 
 // ── Geo helpers ─────────────────────────────────────────────
 const rad = (d) => d * Math.PI / 180;
@@ -176,14 +185,21 @@ function ingest(data) {
     if (!isFinite(latRaw) || !isFinite(lonRaw)) { return; }
     if (Math.abs(latRaw) > 90 || Math.abs(lonRaw) > 180) { return; }
 
-    const sos = String(data.status).toUpperCase() === "SOS" || data.sos === true;
+    const statusStr = String(data.status ?? "").trim().toUpperCase();
+    const sos = statusStr === "SOS" || statusStr === "1" ||
+                data.sos === true || data.sos === 1 || data.sos === "1";
     const noFix = (data.fix === false) || (data.noFix === true) ||
                   (latRaw === 0 || lonRaw === 0);
 
-    if (noFix && !sos && !MAP_NOFIX_NORMAL) { return; }
-
     const now = data.customLastSeen || Date.now();
-    const state = fleet[id] || (fleet[id] = {
+    const existingState = fleet[id];
+    const wasSos = !!(existingState && existingState.sos);
+    const wasMapped = !!(existingState && existingState.mapped);
+
+    // Allow no-fix packets through if this vessel is clearing an active SOS or already mapped
+    if (noFix && !sos && !wasSos && !wasMapped && !MAP_NOFIX_NORMAL) { return; }
+
+    const state = existingState || (fleet[id] = {
         pts: [], t: 0, brg: 0, kts: 0,
         heard: 0, missed: 0, lastSeq: null, backlogCount: 0
     });
@@ -278,7 +294,9 @@ function ingest(data) {
     state.sos        = sos;
     state.noFix      = noFix;
     state.mapped     = true;
-    state.posSource  = data.positionSource || posSource;
+    state.posSource  = (!sos && data.positionSource && /sos/i.test(data.positionSource))
+                       ? posSource
+                       : (data.positionSource || posSource);
     state.fixAgeMin  = (data.fixAgeMin !== undefined && data.fixAgeMin !== null)
                        ? data.fixAgeMin : fixAgeMin;
     state.source     = pktType === "BACKLOG" ? "Backlog" : (data.source || "Live");
@@ -299,7 +317,19 @@ function ingest(data) {
     draw(id, state);
     renderFleet();
     if (selectedId === id) { renderDiagnostics(id); }
-    if (sos) { raiseSos(id); }
+    if (sos) {
+        raiseSos(id);
+    } else if (wasSos) {
+        state.alerted = false;
+        toast("SOS cleared for " + id + " — restored to normal state", "good");
+        const nextSosId = Object.keys(fleet).find((k) => fleet[k].sos);
+        if (nextSosId) {
+            raiseSos(nextSosId);
+        } else {
+            $("sos-banner").hidden = true;
+            sosFocusId = null;
+        }
+    }
 }
 
 // ── The boat SVG (2 Hz strobe on SOS) ───────────────────────
@@ -331,7 +361,7 @@ function pumpboatIcon(deg, distress, moving, nofix) {
       <path d="M36.5 57 q2.5 2.5 3.5 5"/>
     </g>` : "";
 
-    return `<svg xmlns="http://www.w3.org/svg" viewBox="0 0 64 64" width="64" height="64">
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="${ICON_PX}" height="${ICON_PX}" style="display:block">
   ${pulse}
   <g transform="rotate(${deg} 32 32)" opacity="${nofix ? "0.9" : "1"}">
     ${wake}
